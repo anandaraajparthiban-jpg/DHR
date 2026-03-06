@@ -1,5 +1,6 @@
 // braiins.ts — Braiins spot helpers: settings, orderbook, price/limit conversion, bid placement.
 import fetch from 'node-fetch';
+import crypto from 'node:crypto';
 
 export interface BraiinsSettings {
   hrUnit: string;
