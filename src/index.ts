@@ -1,14 +1,12 @@
 // index.ts — Discord bot main:
-// - Registers slash commands (/quote, /rent, /status, /cancel, /payment_status, /mark_paid, /verify_payments).
-// - /quote: get price with base/fee/margin/buffer (no pool/worker needed).
-// - /rent: validate inputs, check balances, lock quote, return payment methods.
-// - /mark_paid (admin): activate paid orders; primary provider is Bitties proxy if configured.
-// - Payment verifier loop: auto-check pending intents and auto-activate confirmed orders.
-// - Balance gates: Braiins always; NiceHash gate optional via env/override.
-// - Payments: USDC (Base), USDC (Solana), BTC.
+// - Registers slash commands (/quote, /rent, /status, /cancel, /payment_status, /mark_paid, /verify_payments, /verify_payments_debug).
+// - /rent collects user provider choice + pool + worker, creates payment intent, and waits for payment.
+// - On payment confirmation, orders can auto-activate; admin can still trigger /mark_paid manually.
+// - Fulfillment providers: NiceHash, Braiins, Bitties Proxy.
 import 'dotenv/config';
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
 import { quoteHashrate, btcUsd } from './pricing.js';
+import { ensureDbReady, dbBackend } from './db.js';
 import {
   createOrder,
   cancelOrder,
@@ -28,8 +26,10 @@ import { braiinsBalanceUsd, nicehashBalanceUsd } from './balances.js';
 import { createNhOrder, cancelNhOrder } from './nhOrder.js';
 import { createBraiinsOrder } from './braiins.js';
 import { ensurePaymentIntent, getPaymentIntentByOrder } from './payments.js';
-import { runPaymentVerificationTick, startPaymentVerificationLoop } from './paymentVerifier.js';
+import { runPaymentVerificationTick, runPaymentVerificationDebug, startPaymentVerificationLoop } from './paymentVerifier.js';
 import { createProxySession, proxyEnabled, terminateProxySession } from './bittiesProxy.js';
+
+type ProviderChoice = 'nicehash' | 'braiins' | 'bitties_proxy';
 
 const token = process.env.DISCORD_TOKEN ?? '';
 const appId = process.env.DISCORD_APP_ID ?? '';
@@ -40,19 +40,37 @@ if (!token || !appId) {
 
 const adminUserIds = new Set((process.env.ADMIN_USER_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean));
 const orderExpiryTimers = new Map<string, NodeJS.Timeout>();
+const providerChoices = [
+  { name: 'NiceHash', value: 'nicehash' },
+  { name: 'Braiins', value: 'braiins' },
+  { name: 'Bitties Proxy', value: 'bitties_proxy' },
+] as const;
 
-// Slash command definitions
 const commands = [
   new SlashCommandBuilder()
     .setName('quote')
     .setDescription('Get a hashrate quote')
     .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
-    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true)),
+    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true))
+    .addStringOption((opt) =>
+      opt
+        .setName('provider')
+        .setDescription('Preferred provider')
+        .setRequired(false)
+        .addChoices(...providerChoices)
+    ),
   new SlashCommandBuilder()
     .setName('rent')
     .setDescription('Place a hashrate rental')
     .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
     .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true))
+    .addStringOption((opt) =>
+      opt
+        .setName('provider')
+        .setDescription('Fulfillment provider')
+        .setRequired(true)
+        .addChoices(...providerChoices)
+    )
     .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL').setRequired(true))
     .addStringOption((opt) => opt.setName('worker').setDescription('Worker name').setRequired(true)),
   new SlashCommandBuilder()
@@ -72,6 +90,17 @@ const commands = [
     .setDescription('Check payment status for an order')
     .addStringOption((opt) => opt.setName('id').setDescription('Order ID').setRequired(true)),
   new SlashCommandBuilder().setName('verify_payments').setDescription('Admin: run payment verification scan now'),
+  new SlashCommandBuilder()
+    .setName('verify_payments_debug')
+    .setDescription('Admin: run payment verification diagnostics')
+    .addIntegerOption((opt) =>
+      opt
+        .setName('limit')
+        .setDescription('How many pending intents to include (default 10, max 20)')
+        .setRequired(false)
+        .setMinValue(1)
+        .setMaxValue(20)
+    ),
 ];
 
 async function registerCommands() {
@@ -92,6 +121,27 @@ function isAdmin(userId: string): boolean {
 
 function canAccessOrder(userId: string, orderUserId: string): boolean {
   return isAdmin(userId) || userId === orderUserId;
+}
+
+function asProvider(value: string | null): ProviderChoice {
+  if (value === 'nicehash' || value === 'braiins' || value === 'bitties_proxy') return value;
+  return 'bitties_proxy';
+}
+
+function providerLabel(provider: ProviderChoice | string | undefined): string {
+  if (provider === 'nicehash') return 'NiceHash';
+  if (provider === 'braiins') return 'Braiins';
+  if (provider === 'proxy') return 'Bitties Proxy';
+  if (provider === 'bitties_proxy') return 'Bitties Proxy';
+  return String(provider || 'unknown');
+}
+
+function providerQuoteSource(provider: ProviderChoice | undefined): 'nicehash' | 'braiins' | 'internal' | undefined {
+  if (!provider) return undefined;
+  if (provider === 'nicehash') return 'nicehash';
+  if (provider === 'braiins') return 'braiins';
+  // Proxy pricing can use best market quote unless custom internal pricing is wired.
+  return undefined;
 }
 
 async function notifyUser(userId: string, message: string) {
@@ -122,12 +172,11 @@ function scheduleOrderExpiry(orderId: string, expiresAt: number) {
 
 async function expireOrder(orderId: string) {
   orderExpiryTimers.delete(orderId);
-
   const current = await getOrder(orderId);
   if (!current || current.status !== 'active') return;
 
   let terminated = true;
-  if (current.fulfillmentProvider === 'proxy' && current.proxySessionId) {
+  if ((current.fulfillmentProvider === 'proxy' || current.fulfillmentProvider === 'bitties_proxy') && current.proxySessionId) {
     try {
       await terminateProxySession(current.proxySessionId);
     } catch (err) {
@@ -154,7 +203,9 @@ async function expireOrder(orderId: string) {
   await completeOrder(orderId);
   await notifyUser(
     current.user,
-    `Your DHR order ${orderId} has ended and was terminated successfully.\nPool: ${current.pool}\nWorker: ${current.worker}`
+    `Your DHR order ${orderId} has ended and was terminated successfully.\nProvider: ${providerLabel(
+      current.fulfillmentProvider
+    )}\nPool: ${current.pool}\nWorker: ${current.worker}`
   );
 }
 
@@ -169,7 +220,99 @@ async function restoreOrderExpirySchedules() {
   }
 }
 
-// Route slash commands to handlers; reply ephemeral on errors.
+async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): Promise<string> {
+  const o = await getOrder(orderId);
+  if (!o) throw new Error('Not found');
+
+  if (requirePaymentConfirmed) {
+    const payment = await getPaymentIntentByOrder(orderId);
+    if (!payment || payment.status !== 'confirmed') {
+      throw new Error(`Order ${orderId} has no confirmed payment yet`);
+    }
+  }
+
+  const requestedProvider = asProvider(o.requestedProvider ?? null);
+  const usdPerPhDay = await latestUsdPerPhDay(o, requestedProvider);
+  let expiresAt = Date.now() + o.hours * 3600 * 1000;
+  let placed = '';
+
+  if (requestedProvider === 'bitties_proxy') {
+    if (!proxyEnabled()) {
+      throw new Error('Bitties proxy is not configured (set BITTIES_PROXY_BASE and optional token)');
+    }
+    const proxy = await createProxySession({
+      orderId: o.id,
+      userId: o.user,
+      ph: o.ph,
+      hours: o.hours,
+      poolUrl: o.pool,
+      worker: o.worker,
+    });
+    await saveProxyInfo(orderId, { proxySessionId: proxy.id });
+    if (proxy.expiresAt && isFinite(proxy.expiresAt)) {
+      expiresAt = proxy.expiresAt;
+    }
+    placed = `Bitties proxy session started: ${proxy.id}.`;
+  } else if (requestedProvider === 'nicehash') {
+    const nh = await createNhOrder({ ph: o.ph, hours: o.hours, poolUrl: o.pool, worker: o.worker, usdPerPhDay });
+    await saveNhInfo(orderId, {
+      nhOrderId: nh.id,
+      nhMarket: nh.market,
+      nhPrice: nh.price,
+      nhLimit: nh.limit,
+      nhAmount: nh.amount,
+    });
+    placed = `NiceHash order placed: ${nh.id} (market ${nh.market}, price ${nh.price.toFixed(8)} BTC/EH/day, limit ${nh.limit.toFixed(6)} EH/s).`;
+  } else {
+    const token = process.env.BRAIINS_OWNER_TOKEN || process.env.BRAIINS_READONLY_TOKEN;
+    if (!token) throw new Error('Missing Braiins token');
+    const br = await createBraiinsOrder({
+      ph: o.ph,
+      hours: o.hours,
+      poolUrl: o.pool,
+      worker: o.worker,
+      usdPerPhDay,
+      token,
+      memo: `order-${orderId}`,
+    });
+    await saveFulfillmentProvider(orderId, 'braiins');
+    placed = `Braiins order placed: ${br.id}`;
+  }
+
+  await updateExpiry(orderId, expiresAt);
+  const msg = await markPaid(orderId);
+  scheduleOrderExpiry(orderId, expiresAt);
+
+  const refreshed = await getOrder(orderId);
+  await notifyUser(
+    o.user,
+    `Your DHR order ${orderId} is now active.\nProvider: ${providerLabel(
+      refreshed?.fulfillmentProvider ?? requestedProvider
+    )}\nPool: ${o.pool}\nWorker: ${o.worker}\nEnds: ${new Date(expiresAt).toISOString()}`
+  );
+
+  return `${msg}\n${placed}`;
+}
+
+async function autoActivateConfirmedOrders(orderIds: string[]): Promise<number> {
+  const autoActivate = (process.env.AUTO_ACTIVATE_ON_PAYMENT ?? 'true').toLowerCase() !== 'false';
+  if (!autoActivate) return 0;
+
+  let activated = 0;
+  for (const id of orderIds) {
+    const begin = await beginFulfillment(id);
+    if (begin !== 'ok') continue;
+    try {
+      await fulfillOrder(id, true);
+      activated += 1;
+    } catch (err) {
+      await rollbackFulfillment(id).catch((rollbackErr) => console.error('auto-fulfillment rollback failed', rollbackErr));
+      console.error(`auto activation failed for order ${id}`, err);
+    }
+  }
+  return activated;
+}
+
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   try {
@@ -195,6 +338,9 @@ client.on('interactionCreate', async (interaction) => {
       case 'verify_payments':
         await handleVerifyPayments(interaction);
         break;
+      case 'verify_payments_debug':
+        await handleVerifyPaymentsDebug(interaction);
+        break;
       default:
         await interaction.reply({ content: 'Unknown command', ephemeral: true });
     }
@@ -206,10 +352,11 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// /quote: lightweight quote without pool/worker, just PH + hours.
 async function handleQuote(interaction: ChatInputCommandInteraction) {
   const ph = interaction.options.getNumber('ph', true);
   const hours = interaction.options.getInteger('hours', true);
+  const providerRaw = interaction.options.getString('provider');
+  const provider = providerRaw ? asProvider(providerRaw) : undefined;
   const pool = 'quote';
   const worker = 'quote';
 
@@ -234,7 +381,7 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
     return;
   }
 
-  const q = await quoteHashrate({ ph, hours, pool, worker });
+  const q = await quoteHashrate({ ph, hours, pool, worker, preferredSource: providerQuoteSource(provider) });
   const durationFactor = ph * (hours / 24);
   const baseTotal = q.baseUsdPerPhDay * durationFactor;
   const feeTotal = q.feeUsdPerPhDay * durationFactor;
@@ -245,12 +392,13 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
   const nhFeeBps = Number(process.env.NICEHASH_FEE_BPS ?? '200');
   const braiinsFeeBps = Number(process.env.BRAIINS_FEE_BPS ?? '200');
   const feePct = q.source === 'nicehash' ? nhFeeBps / 100 : q.source === 'braiins' ? braiinsFeeBps / 100 : 0;
-  const feeLineBps = `  Platform fee (${feePct.toFixed(2)}%): $${q.feeUsdPerPhDay.toFixed(2)} / PH-day → $${feeTotal.toFixed(2)}`;
-  const marginLineBps = `  Margin (${(marginBps / 100).toFixed(2)}%): $${q.marginUsdPerPhDay.toFixed(2)} / PH-day → $${marginTotal.toFixed(2)}`;
-  const bufferLine = `  BETA buffer funding (${(bufferBps / 100).toFixed(2)}%): $${q.bufferUsdPerPhDay.toFixed(2)} / PH-day → $${bufferTotal.toFixed(2)}`;
+  const feeLineBps = `  Platform fee (${feePct.toFixed(2)}%): $${q.feeUsdPerPhDay.toFixed(2)} / PH-day -> $${feeTotal.toFixed(2)}`;
+  const marginLineBps = `  Margin (${(marginBps / 100).toFixed(2)}%): $${q.marginUsdPerPhDay.toFixed(2)} / PH-day -> $${marginTotal.toFixed(2)}`;
+  const bufferLine = `  BETA buffer funding (${(bufferBps / 100).toFixed(2)}%): $${q.bufferUsdPerPhDay.toFixed(2)} / PH-day -> $${bufferTotal.toFixed(2)}`;
   const lines = [
-    `Quote: ${ph} PH for ${hours}h → $${q.totalUsd.toFixed(2)} (unit: $${q.usdPerPhDay.toFixed(2)} / PH-day).`,
-    `  Base: $${q.baseUsdPerPhDay.toFixed(2)} / PH-day → $${baseTotal.toFixed(2)}`,
+    `Quote: ${ph} PH for ${hours}h -> $${q.totalUsd.toFixed(2)} (unit: $${q.usdPerPhDay.toFixed(2)} / PH-day).`,
+    `Requested provider: ${provider ? providerLabel(provider) : 'Auto (best available quote)'}.`,
+    `  Base: $${q.baseUsdPerPhDay.toFixed(2)} / PH-day -> $${baseTotal.toFixed(2)}`,
     feeLineBps,
     marginLineBps,
     bufferLine,
@@ -258,19 +406,26 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
   await interaction.reply({ content: lines.join('\n'), ephemeral: true });
 }
 
-// /rent: validates inputs, balance gates, locks price, returns payment instructions.
 async function handleRent(interaction: ChatInputCommandInteraction) {
   const ph = interaction.options.getNumber('ph', true);
   const hours = interaction.options.getInteger('hours', true);
+  const provider = asProvider(interaction.options.getString('provider', true));
   const pool = interaction.options.getString('pool', true);
   const worker = interaction.options.getString('worker', true);
 
-  // Balance gate: Braiins always; NiceHash optional (env toggle) with override support.
   const braiinsBal = await braiinsBalanceUsd();
   const nhBal = await nicehashBalanceUsd();
   const nhGate = (process.env.NICEHASH_GATE_ENABLED ?? 'true').toLowerCase() !== 'false';
-  if (!isFinite(braiinsBal.usd) || braiinsBal.usd < 50 || (nhGate && (!isFinite(nhBal.usd) || nhBal.usd < 50))) {
-    await interaction.reply({ content: 'admin needs to top up hashrate accounts. please check back later.', ephemeral: true });
+  if (provider === 'braiins' && (!isFinite(braiinsBal.usd) || braiinsBal.usd < 50)) {
+    await interaction.reply({ content: 'Braiins account balance is low. Please check back later.', ephemeral: true });
+    return;
+  }
+  if (provider === 'nicehash' && nhGate && (!isFinite(nhBal.usd) || nhBal.usd < 50)) {
+    await interaction.reply({ content: 'NiceHash account balance is low. Please check back later.', ephemeral: true });
+    return;
+  }
+  if (provider === 'bitties_proxy' && !proxyEnabled()) {
+    await interaction.reply({ content: 'Bitties proxy is not configured yet. Please contact admin.', ephemeral: true });
     return;
   }
 
@@ -300,17 +455,28 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
     await interaction.reply({ content: `Pool not allowed: ${poolOk.reason}`, ephemeral: true });
     return;
   }
+  if (provider === 'bitties_proxy' && !pool.toLowerCase().startsWith('stratum+tcp://')) {
+    await interaction.reply({ content: 'Bitties provider supports only stratum+tcp:// pool URLs.', ephemeral: true });
+    return;
+  }
 
   let q;
   try {
-    q = await quoteHashrate({ ph, hours, pool, worker });
-  } catch (err) {
+    q = await quoteHashrate({ ph, hours, pool, worker, preferredSource: providerQuoteSource(provider) });
+  } catch {
     await interaction.reply({ content: 'No valid quote available right now. Please retry shortly.', ephemeral: true });
     return;
   }
 
-  // Create order, lock price, and return payment instructions.
-  const order = await createOrder({ ph, hours, pool, worker, user: interaction.user.id, totalUsd: q.totalUsd });
+  const order = await createOrder({
+    ph,
+    hours,
+    pool,
+    worker,
+    requestedProvider: provider,
+    user: interaction.user.id,
+    totalUsd: q.totalUsd,
+  });
   const btcPrice = await btcUsd().catch(() => NaN);
   const payment = await ensurePaymentIntent({
     orderId: order.id,
@@ -319,27 +485,29 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
     btcUsd: isFinite(btcPrice) ? btcPrice : undefined,
     expiresAt: order.expiresAt ?? Date.now() + hours * 3600 * 1000,
   });
+
   const usdcAddr = process.env.PAYMENT_USDC_BASE || 'set PAYMENT_USDC_BASE';
   const usdcSolAddr = process.env.PAYMENT_USDC_SOL || 'set PAYMENT_USDC_SOL';
   const btcAddr = process.env.PAYMENT_BTC_ONCHAIN || 'set PAYMENT_BTC_ONCHAIN';
   const expiryIso = new Date(payment.expiresAt).toISOString();
+
   const lines = [
-    `Order ${order.id} accepted. Status: ${order.status}. Source: ${q.source}.`,
+    `Order ${order.id} accepted. Status: ${order.status}. Provider selected: ${providerLabel(provider)}.`,
     `Payment reference: ${payment.reference} (expires ${expiryIso})`,
     `USDC (Base): ${usdcAddr} (amount: ${payment.usdcBaseAmount.toFixed(6)} USDC)`,
     `USDC (Solana): ${usdcSolAddr} (amount: ${payment.usdcSolAmount.toFixed(6)} USDC)`,
     `BTC on-chain: ${btcAddr}` + (payment.btcAmount ? ` (amount: ${payment.btcAmount.toFixed(8)} BTC)` : ''),
-    `Use exact amount for auto-verification. Admin can activate with /mark_paid <id> after confirmation.`
+    `Once payment is confirmed, the order will auto-start on ${providerLabel(provider)}.`
   ];
   await interaction.reply({ content: lines.join('\n'), ephemeral: true });
 }
 
-// /mark_paid: admin-only. Try Braiins first, then fallback to NiceHash. Only mark active if fulfillment succeeds.
 async function handleMarkPaid(interaction: ChatInputCommandInteraction) {
   if (!isAdmin(interaction.user.id)) {
     await interaction.reply({ content: 'Not authorized', ephemeral: true });
     return;
   }
+
   const id = interaction.options.getString('id', true);
   const begin = await beginFulfillment(id);
   if (begin === 'not_found') {
@@ -357,55 +525,27 @@ async function handleMarkPaid(interaction: ChatInputCommandInteraction) {
   }
 
   try {
-    const o = await getOrder(id);
-    if (!o) {
-      await rollbackFulfillment(id);
-      await interaction.reply({ content: 'Not found', ephemeral: true });
-      return;
-    }
     const requireVerified = (process.env.REQUIRE_PAYMENT_CONFIRMATION_FOR_MARK_PAID ?? 'false').toLowerCase() === 'true';
-    if (requireVerified) {
-      const payment = await getPaymentIntentByOrder(id);
-      if (!payment || payment.status !== 'confirmed') {
-        await rollbackFulfillment(id);
-        await interaction.reply({ content: `Order ${id} has no confirmed payment yet`, ephemeral: true });
-        return;
-      }
-    }
-    const usdPerPhDay = await latestUsdPerPhDay(o);
-    let placed = '';
-    let nhExpirySchedule: { orderId: string; nhOrderId: string; expiresAt: number } | undefined;
-    try {
-      const token = process.env.BRAIINS_OWNER_TOKEN || process.env.BRAIINS_READONLY_TOKEN;
-      if (!token) throw new Error('Missing Braiins token');
-      const br = await createBraiinsOrder({ ph: o.ph, hours: o.hours, poolUrl: o.pool, worker: o.worker, usdPerPhDay, token: token, memo: `order-${id}` });
-      placed = `Braiins order placed: ${br.id}`;
-    } catch (err) {
-      console.error('braiins fulfillment error', err);
-      const nh = await createNhOrder({ ph: o.ph, hours: o.hours, poolUrl: o.pool, worker: o.worker, usdPerPhDay });
-      await saveNhInfo(id, { nhOrderId: nh.id, nhMarket: nh.market, nhPrice: nh.price, nhLimit: nh.limit, nhAmount: nh.amount });
-      const expiresAt = Date.now() + o.hours * 3600 * 1000;
-      await updateExpiry(id, expiresAt);
-      nhExpirySchedule = { orderId: id, nhOrderId: nh.id, expiresAt };
-      placed = `NiceHash order placed: ${nh.id} (market ${nh.market}, price ${nh.price.toFixed(8)} BTC/EH/day, limit ${nh.limit.toFixed(6)} EH/s).`;
-    }
-    const msg = await markPaid(id);
-    if (nhExpirySchedule) {
-      scheduleNhExpiryCancel(nhExpirySchedule);
-    }
-    await interaction.reply({ content: msg + '\n' + placed, ephemeral: true });
+    const result = await fulfillOrder(id, requireVerified);
+    await interaction.reply({ content: result, ephemeral: true });
   } catch (err) {
     await rollbackFulfillment(id).catch((rollbackErr) => console.error('fulfillment rollback failed', rollbackErr));
-    console.error('fulfillment error', err);
-    const msg = `Fulfillment error: ${(err as Error).message}`;
-    await interaction.reply({ content: msg, ephemeral: true });
+    await interaction.reply({ content: `Fulfillment error: ${(err as Error).message}`, ephemeral: true });
   }
 }
 
-// Re-quote to get latest usdPerPhDay for activation; tolerate failure by returning NaN.
-async function latestUsdPerPhDay(o: { ph: number; hours: number; pool: string; worker: string }): Promise<number> {
+async function latestUsdPerPhDay(
+  o: { ph: number; hours: number; pool: string; worker: string },
+  provider: ProviderChoice
+): Promise<number> {
   try {
-    const q = await quoteHashrate({ ph: o.ph, hours: o.hours, pool: o.pool, worker: o.worker });
+    const q = await quoteHashrate({
+      ph: o.ph,
+      hours: o.hours,
+      pool: o.pool,
+      worker: o.worker,
+      preferredSource: providerQuoteSource(provider),
+    });
     return q.usdPerPhDay;
   } catch {
     return NaN;
@@ -423,8 +563,17 @@ async function handleStatus(interaction: ChatInputCommandInteraction) {
     await interaction.reply({ content: 'Not authorized', ephemeral: true });
     return;
   }
-  const status = `Order ${id}: ${o.status}, ${o.ph} PH for ${o.hours}h to ${o.pool} worker ${o.worker}`;
-  await interaction.reply({ content: status, ephemeral: true });
+
+  const status = [
+    `Order ${id}: ${o.status}`,
+    `Requested provider: ${providerLabel(o.requestedProvider)}`,
+    `Active provider: ${providerLabel(o.fulfillmentProvider)}`,
+    `Size: ${o.ph} PH for ${o.hours}h`,
+    `Pool: ${o.pool}`,
+    `Worker: ${o.worker}`,
+    `Expires: ${o.expiresAt ? new Date(o.expiresAt).toISOString() : 'n/a'}`,
+  ];
+  await interaction.reply({ content: status.join('\n'), ephemeral: true });
 }
 
 async function handleCancel(interaction: ChatInputCommandInteraction) {
@@ -477,18 +626,59 @@ async function handleVerifyPayments(interaction: ChatInputCommandInteraction) {
     await interaction.reply({ content: 'Not authorized', ephemeral: true });
     return;
   }
+
   const summary = await runPaymentVerificationTick();
+  const activated = await autoActivateConfirmedOrders(summary.confirmedOrderIds);
   await interaction.reply({
-    content: `Verification complete: checked=${summary.checked}, confirmed=${summary.confirmed}, expired=${summary.expired}`,
+    content: `Verification complete: checked=${summary.checked}, confirmed=${summary.confirmed}, expired=${summary.expired}, auto_activated=${activated}`,
     ephemeral: true,
   });
 }
 
+async function handleVerifyPaymentsDebug(interaction: ChatInputCommandInteraction) {
+  if (!isAdmin(interaction.user.id)) {
+    await interaction.reply({ content: 'Not authorized', ephemeral: true });
+    return;
+  }
+
+  const limit = interaction.options.getInteger('limit') ?? 10;
+  const debug = await runPaymentVerificationDebug({ maxIntents: limit });
+
+  const lines: string[] = [
+    `Debug scan: checked=${debug.checked}, btc_txs=${debug.scan.btcTxs}, usdc_base_transfers=${debug.scan.usdcBaseTransfers}, usdc_sol_transfers=${debug.scan.usdcSolTransfers}`,
+  ];
+
+  for (const d of debug.intents) {
+    const idShort = d.orderId.slice(0, 8);
+    const matched = d.matched
+      ? `matched ${d.matchedMethod} tx=${d.matchedTxId ?? 'n/a'}`
+      : 'no match';
+    lines.push(`[${idShort}] ${matched}`);
+    lines.push(`  btc_expected=${d.expectedBtc ? d.expectedBtc.toFixed(8) : 'n/a'} usdc_base=${d.expectedUsdcBase.toFixed(6)} usdc_sol=${d.expectedUsdcSol.toFixed(6)}`);
+    lines.push(`  ${d.checks.join(' | ')}`);
+  }
+
+  let out = lines.join('\n');
+  if (out.length > 1900) {
+    out = `${out.slice(0, 1850)}\n...truncated`;
+  }
+  await interaction.reply({ content: out, ephemeral: true });
+}
+
 async function start() {
+  await ensureDbReady();
+  console.log(`Database backend: ${dbBackend()}`);
   await registerCommands();
   await client.login(token);
-  await restoreNhExpirySchedules();
-  startPaymentVerificationLoop();
+  await restoreOrderExpirySchedules();
+  startPaymentVerificationLoop({
+    onConfirmedOrders: async (orderIds) => {
+      const activated = await autoActivateConfirmedOrders(orderIds);
+      if (activated > 0) {
+        console.log(`Auto-activated ${activated} order(s) from payment confirmations`);
+      }
+    },
+  });
 }
 
 start().catch((err) => {

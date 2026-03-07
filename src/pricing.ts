@@ -9,6 +9,7 @@ interface QuoteInput {
   hours: number;
   pool: string;
   worker: string;
+  preferredSource?: 'nicehash' | 'braiins' | 'internal';
 }
 
 interface QuoteResult {
@@ -41,12 +42,15 @@ export async function quoteHashrate(input: QuoteInput): Promise<QuoteResult> {
     .map((r) => (r as PromiseFulfilledResult<QuoteResult>).value)
     .filter((q) => isFinite(q.usdPerPhDay) && isFinite(q.totalUsd));
 
-  if (valid.length === 0) {
+  const preferred = input.preferredSource ? valid.filter((q) => q.source === input.preferredSource) : valid;
+  const candidates = preferred.length > 0 ? preferred : valid;
+
+  if (candidates.length === 0) {
     throw new Error('No quotes available');
   }
 
   // pick cheapest
-  let best = valid.reduce((a, b) => (a.usdPerPhDay <= b.usdPerPhDay ? a : b));
+  let best = candidates.reduce((a, b) => (a.usdPerPhDay <= b.usdPerPhDay ? a : b));
 
   // apply margin, buffer, and floor
   const marginMult = 1 + marginBps / 10_000;
