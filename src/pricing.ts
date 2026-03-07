@@ -27,6 +27,7 @@ const bufferBps = Number(process.env.BETA_BUFFER_BPS ?? '1000'); // default 10%
 const floorUsdPerPhDay = Number(process.env.FLOOR_USD_PER_PH_DAY ?? '0');
 const nhFeeBps = Number(process.env.NICEHASH_FEE_BPS ?? '200'); // default 2%
 const braiinsFeeBps = Number(process.env.BRAIINS_FEE_BPS ?? '200'); // default 2%
+const staticInternalUsdPerPhDay = Number(process.env.INTERNAL_CAPACITY_USD_PER_PH_DAY ?? '0');
 const disableNicehash = false; // re-enable NiceHash
 
 // quoteHashrate: gather quotes from NiceHash, Braiins, internal; pick cheapest after fees/margin/buffer.
@@ -46,7 +47,9 @@ export async function quoteHashrate(input: QuoteInput): Promise<QuoteResult> {
   const candidates = preferred.length > 0 ? preferred : valid;
 
   if (candidates.length === 0) {
-    throw new Error('No quotes available');
+    throw new Error(
+      'No quotes available. Configure NiceHash/Braiins credentials or set INTERNAL_CAPACITY_USD_PER_PH_DAY.'
+    );
   }
 
   // pick cheapest
@@ -254,6 +257,19 @@ async function braiinsOrderbook(token: string): Promise<any> {
 
 // Quote internal capacity API (stubbed).
 async function quoteInternal(input: QuoteInput): Promise<QuoteResult> {
+  if (isFinite(staticInternalUsdPerPhDay) && staticInternalUsdPerPhDay > 0) {
+    const baseUsdPerPhDay = staticInternalUsdPerPhDay;
+    return {
+      usdPerPhDay: baseUsdPerPhDay,
+      totalUsd: baseUsdPerPhDay * (input.ph * (input.hours / 24)),
+      source: 'internal',
+      baseUsdPerPhDay,
+      feeUsdPerPhDay: 0,
+      marginUsdPerPhDay: 0,
+      bufferUsdPerPhDay: 0,
+    };
+  }
+
   // Stub: call your internal capacity API if available
   const url = process.env.INTERNAL_CAPACITY_API;
   const token = process.env.INTERNAL_CAPACITY_TOKEN;

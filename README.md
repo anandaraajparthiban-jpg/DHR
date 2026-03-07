@@ -3,6 +3,7 @@
 ## What’s working
 - Discord bot with slash commands: /quote, /rent, /status, /cancel, /payment_status, /mark_paid (admin), /verify_payments (admin).
 - Quotes: price from NiceHash + Braiins with fee/margin/buffer breakdown; BTC price fallback; pool validation and size/duration caps; payment instructions (USDC Base, USDC Solana, BTC); buffer baked in and shown.
+- Quotes can also use a static internal fallback via `INTERNAL_CAPACITY_USD_PER_PH_DAY` when external markets are unavailable.
 - Persistence: runtime-selectable DB backend (`sqlite` default, or `postgres` via env) for orders/payment state.
 - Provider selection: users choose provider at rent time (`NiceHash`, `Braiins`, or `Bitties Proxy`).
 - Fulfillment: selected provider is respected at activation time (no cross-provider fallback unless changed in code).
@@ -44,12 +45,13 @@
    - USDC Solana verify: `SOLANA_RPC_URL`, `USDC_SOL_MINT`, `PAYMENT_SOL_SCAN_LIMIT`, `PAYMENT_USDC_SOL_TOLERANCE_UNITS`
    - Bitties Proxy: `BITTIES_PROXY_ENABLED`, `BITTIES_PROXY_BASE`, `BITTIES_PROXY_TOKEN`, `BITTIES_PROXY_USERNAME`, `BITTIES_PROXY_PASSWORD`, `BITTIES_PROXY_AUTH_PATH`, `BITTIES_PROXY_POOLS_PATH`, `BITTIES_PROXY_WORKER_PASS`, `BITTIES_PROXY_WEIGHT_PER_PH`, `BITTIES_PROXY_MIN_WEIGHT`, `BITTIES_PROXY_MAX_WEIGHT`
    - Fulfillment retries: `FULFILLMENT_TERMINATION_RETRY_SEC`
-   - Pricing: `PRICE_MARGIN_BPS`, `BETA_BUFFER_BPS`, `NICEHASH_FEE_BPS`, `BRAIINS_FEE_BPS`, `FLOOR_USD_PER_PH_DAY`
+   - Pricing: `PRICE_MARGIN_BPS`, `BETA_BUFFER_BPS`, `NICEHASH_FEE_BPS`, `BRAIINS_FEE_BPS`, `FLOOR_USD_PER_PH_DAY`, optional `INTERNAL_CAPACITY_USD_PER_PH_DAY`
    - Gates/Caps: `MIN_PH`, `MAX_PH`, `MIN_HOURS`, `MAX_HOURS`, `ADMIN_USER_IDS`, `ALLOWED_POOLS`
 3) Run: `npm run dev` (dev) or `npm run build && npm start` (prod)
 
 Production step-by-step guide: `docs/production-install.md`
 Production go-live gate: `docs/production-go-live-checklist.md`
+Detailed user manual: `docs/user-manual.md`
 
 ## Remaining TODO
 - Fix Braiins spot ordering (working base/token) and Braiins quoting.

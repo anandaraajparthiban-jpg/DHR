@@ -381,7 +381,14 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
     return;
   }
 
-  const q = await quoteHashrate({ ph, hours, pool, worker, preferredSource: providerQuoteSource(provider) });
+  let q;
+  try {
+    q = await quoteHashrate({ ph, hours, pool, worker, preferredSource: providerQuoteSource(provider) });
+  } catch (err) {
+    const msg = (err as Error).message || 'No valid quote available right now.';
+    await interaction.reply({ content: msg, ephemeral: true });
+    return;
+  }
   const durationFactor = ph * (hours / 24);
   const baseTotal = q.baseUsdPerPhDay * durationFactor;
   const feeTotal = q.feeUsdPerPhDay * durationFactor;
