@@ -49,6 +49,7 @@
 3) Run: `npm run dev` (dev) or `npm run build && npm start` (prod)
 
 Production step-by-step guide: `docs/production-install.md`
+Production go-live gate: `docs/production-go-live-checklist.md`
 
 ## Remaining TODO
 - Fix Braiins spot ordering (working base/token) and Braiins quoting.
