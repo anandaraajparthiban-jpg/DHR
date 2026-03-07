@@ -1,22 +1,13 @@
-// balances.ts — balance checks for Braiins and NiceHash (gates /rent). Uses NH wrapper; Braiins via address balance. Supports override envs.
+// balances.ts — balance checks for Braiins and NiceHash (gates /rent).
 import fetch from 'node-fetch';
 import { btcUsd } from './pricing.js';
-import NHApi from 'nicehash-api-wrapper-v2';
-
-function getNhClient() {
-  const apiKey = process.env.NICEHASH_API_KEY;
-  const apiSecret = process.env.NICEHASH_API_SECRET;
-  const org = process.env.NICEHASH_ORG_ID;
-  if (!apiKey || !apiSecret || !org) throw new Error('Missing NiceHash credentials');
-  return new NHApi({ apiKey, apiSecret, orgId: org });
-}
+import { nhPrivateRequest } from './nhHttp.js';
 
 export interface WalletStatus {
   usd: number;
   raw: any;
 }
 
-// Braiins: use on-chain BTC address from env, convert to USD.
 const BRAIINS_BTC_ADDRESS = process.env.BRAIINS_BTC_ADDRESS || 'bc1qd7ghrtr0wc9xz3phn93gue8s0p9hxdgyt8htuj';
 
 export async function braiinsBalanceUsd(): Promise<WalletStatus> {
@@ -36,22 +27,63 @@ export async function braiinsBalanceUsd(): Promise<WalletStatus> {
   }
 }
 
-// NiceHash: use wrapper Accounting.getBalance; supports override for gating.
+function firstFinite(values: Array<unknown>): number | undefined {
+  for (const v of values) {
+    const n = Number(v);
+    if (isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+async function fetchNicehashBtcBalance(): Promise<{ btc: number; raw: any }> {
+  const btcAccount: any = await nhPrivateRequest('GET', '/main/api/v2/accounting/account2/BTC', {
+    query: { extendedResponse: false },
+  });
+
+  const direct = firstFinite([
+    btcAccount?.available,
+    btcAccount?.availableAmount,
+    btcAccount?.available?.total,
+    btcAccount?.available?.quantity,
+    btcAccount?.balance?.available,
+    btcAccount?.account?.available,
+  ]);
+  if (direct !== undefined) {
+    return { btc: direct, raw: btcAccount };
+  }
+
+  const listPayload: any = await nhPrivateRequest('GET', '/main/api/v2/accounting/accounts2', {
+    query: { extendedResponse: false },
+  });
+  const list: any[] = listPayload?.currencies ?? listPayload?.balances ?? listPayload?.data ?? listPayload?.wallets ?? [];
+  const btcEntry = Array.isArray(list)
+    ? list.find((w: any) => String(w?.currency || w?.asset || '').toUpperCase() === 'BTC')
+    : undefined;
+
+  const fromList = firstFinite([
+    btcEntry?.available,
+    btcEntry?.availableAmount,
+    btcEntry?.available?.total,
+    btcEntry?.available?.quantity,
+  ]);
+
+  if (fromList === undefined) {
+    throw new Error('unable to parse NiceHash BTC balance');
+  }
+  return { btc: fromList, raw: { btcAccount, listPayload } };
+}
+
 export async function nicehashBalanceUsd(): Promise<WalletStatus> {
   const overrideBtc = process.env.NICEHASH_BAL_OVERRIDE_BTC ? Number(process.env.NICEHASH_BAL_OVERRIDE_BTC) : undefined;
   if (overrideBtc && isFinite(overrideBtc)) {
     const usd = overrideBtc * (await btcUsd());
     return { usd, raw: { override: true, btc: overrideBtc } };
   }
+
   try {
-    const nh = getNhClient();
-    const data: any = await nh.Accounting.getBalance();
-    const list = data?.balances ?? data?.data ?? data?.wallets ?? [];
-    const btcEntry = Array.isArray(list) ? list.find((w: any) => (w?.currency || w?.asset)?.toUpperCase() === 'BTC') : undefined;
-    const btcAvail = Number(btcEntry?.available || btcEntry?.availableAmount || btcEntry?.available?.total || btcEntry?.available?.quantity || 0);
-    const btc = isFinite(btcAvail) ? btcAvail : 0;
+    const { btc, raw } = await fetchNicehashBtcBalance();
     const usd = btc * (await btcUsd());
-    return { usd, raw: data };
+    return { usd, raw };
   } catch (err) {
     console.error('nicehash balance error', err);
     return { usd: Number.POSITIVE_INFINITY, raw: { error: (err as Error).message } };

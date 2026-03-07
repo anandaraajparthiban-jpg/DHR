@@ -126,7 +126,7 @@ function makePgExecutor(client: Pool | PoolClient): DbExecutor {
     },
     async all<T>(sql: string, params: unknown[] = []) {
       const res = await client.query(toPgPlaceholders(sql), params);
-      return res.rows.map((r) => normalizeRowKeys<T>(r));
+      return res.rows.map((r: any) => normalizeRowKeys<T>(r));
     },
     async run(sql: string, params: unknown[] = []) {
       const res = await client.query(toPgPlaceholders(sql), params);

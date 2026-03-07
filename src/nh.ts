@@ -1,16 +1,7 @@
-// nh.ts — NiceHash utilities via nicehash-api-wrapper-v2.
-// - Fetch buy/info factors, orderbook, best market price.
+// nh.ts — NiceHash quote/order helper utilities.
+// - Fetch buy/info factors and public orderbook.
 // - Build NH order params (price BTC/EH/day, limit EH/s, amount BTC) from USD/PH-day quotes.
-import fetch from 'node-fetch';
-import NHApi from 'nicehash-api-wrapper-v2';
-
-function getNhClient() {
-  const apiKey = process.env.NICEHASH_API_KEY;
-  const apiSecret = process.env.NICEHASH_API_SECRET;
-  const org = process.env.NICEHASH_ORG_ID;
-  if (!apiKey || !apiSecret || !org) throw new Error('Missing NiceHash credentials');
-  return new NHApi({ apiKey, apiSecret, orgId: org });
-}
+import { nhPublicRequest } from './nhHttp.js';
 
 export interface NhMarketInfo {
   market: string;
@@ -30,7 +21,6 @@ export interface NhBuyInfo {
   raw: any;
 }
 
-// Build NH order params from USD/PH-day: price BTC/EH-day, limit EH/s, amount BTC.
 export function buildNhOrderParams({
   ph,
   hours,
@@ -59,22 +49,21 @@ export function buildNhOrderParams({
     m = buyInfo.markets[0];
   }
   if (!m) throw new Error(`market ${marketUpper} not in buyInfo and no fallback`);
-  // enforce market to matched one
   market = m.market;
 
-  // price in BTC per EH/day for SHA256ASICBOOST
   const priceBtcPerEhDay = (usdPerPhDay / btcPrice) * 1000;
-  const limitEh = ph / 1000; // PH -> EH/s
+  const limitEh = ph / 1000;
   const amountBtc = priceBtcPerEhDay * limitEh * (hours / 24);
 
-  const price = priceBtcPerEhDay; // NH expects BTC per factor/day; factor is EH for SHA256
-  const limit = limitEh; // EH/s
-  const amount = amountBtc;
-
-  return { price, limit, amount, market: marketUpper, algo };
+  return {
+    price: priceBtcPerEhDay,
+    limit: limitEh,
+    amount: amountBtc,
+    market: market.toUpperCase(),
+    algo,
+  };
 }
 
-// Helper to normalize algo code from buy/info entries.
 function algoCode(a: any): string {
   if (!a) return '';
   if (typeof a === 'string') return a;
@@ -86,20 +75,18 @@ function algoCode(a: any): string {
   return '';
 }
 
-// Get buy/info for algo; parse market factors/mins.
 export async function getNhBuyInfo(algo: string = 'SHA256ASICBOOST'): Promise<NhBuyInfo> {
-  const nh = getNhClient();
-  const data: any = await nh.HashPower.getBuyInfo();
+  const data: any = await nhPublicRequest('/main/api/v2/public/buy/info');
   const algos: any[] = data?.algorithms ?? data?.miningAlgorithms ?? [];
   const entry = algos.find((a) => algoCode(a).toUpperCase() === algo.toUpperCase());
   if (!entry) throw new Error(`algo ${algo} not found in buy/info`);
   const entryAlgo = algoCode(entry);
   const markets: NhMarketInfo[] = (entry?.markets || entry?.market || []).map((m: any) => ({
-    market: (m.market || m.name || '').toUpperCase(),
+    market: String(m.market || m.name || '').toUpperCase(),
     marketFactor: Number(m.marketFactor || m.factor || m.market_factor || 0),
-    displayMarketFactor: m.displayMarketFactor || m.marketDisplayFactor || '',
+    displayMarketFactor: String(m.displayMarketFactor || m.marketDisplayFactor || ''),
     priceFactor: Number(m.priceFactor || m.price_factor || 0),
-    displayPriceFactor: m.displayPriceFactor || m.priceDisplayFactor || '',
+    displayPriceFactor: String(m.displayPriceFactor || m.priceDisplayFactor || ''),
     minAmount: Number(m.minAmount || m.minimumAmount || 0),
     minPrice: Number(m.minPrice || m.minimumPrice || 0),
     fixedPrice: Number(m.fixedPrice || m.fixed_price || 0) || undefined,
@@ -109,33 +96,37 @@ export async function getNhBuyInfo(algo: string = 'SHA256ASICBOOST'): Promise<Nh
 }
 
 export async function fetchOrderbook(algo: string, market: string): Promise<number> {
-  const url = `https://api2.nicehash.com/main/api/v2/hashpower/orderBook?algorithm=${encodeURIComponent(algo)}&market=${market}&page=0&pageSize=50`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`orderBook ${market} http ${res.status}`);
-  const data: any = await res.json();
-  const orders = data?.stats?.[market]?.orders || data?.stats?.orders || data?.orderList || [];
+  const data: any = await nhPublicRequest('/main/api/v2/hashpower/orderBook', {
+    algorithm: algo,
+    market,
+    page: 0,
+    pageSize: 50,
+  });
+
+  const marketUpper = market.toUpperCase();
+  const orders = data?.stats?.[marketUpper]?.orders || data?.stats?.orders || data?.orderList || [];
   const prices = Array.isArray(orders)
     ? orders
         .map((o: any) => Number(o.price))
         .filter((n: number) => !isNaN(n))
     : [];
-  if (!prices.length) throw new Error(`orderBook ${market} no prices`);
-  return Math.min(...prices); // BTC per EH/day
+  if (!prices.length) throw new Error(`orderBook ${marketUpper} no prices`);
+  return Math.min(...prices);
 }
 
-// Get cheapest market (USA -> EU) and return min price BTC/EH-day.
 export async function getNhBestMarketPrice(algo: string = 'SHA256ASICBOOST'): Promise<{ market: string; btcPerEhDay: number }> {
-  const nh = getNhClient();
-  const ob: any = await nh.HashPower.getOrderBook(algo, 50, 0);
   const markets = ['USA', 'EU'];
-  const priced: { market: string; btcPerEhDay: number }[] = [];
-  for (const m of markets) {
-    const orders = ob?.stats?.[m]?.orders || ob?.stats?.orders;
-    if (Array.isArray(orders) && orders.length) {
-      const prices = orders.map((o: any) => Number(o.price)).filter((n: number) => !isNaN(n));
-      if (prices.length) priced.push({ market: m, btcPerEhDay: Math.min(...prices) });
+  const priced: Array<{ market: string; btcPerEhDay: number }> = [];
+
+  for (const market of markets) {
+    try {
+      const btcPerEhDay = await fetchOrderbook(algo, market);
+      priced.push({ market, btcPerEhDay });
+    } catch {
+      // ignore individual market fetch failures
     }
   }
+
   if (!priced.length) throw new Error('No market prices available');
   priced.sort((a, b) => a.btcPerEhDay - b.btcPerEhDay);
   return priced[0];

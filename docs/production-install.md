@@ -36,7 +36,7 @@ Edit `.env` and set at minimum:
 - Admins: `ADMIN_USER_IDS`
 - Payments: `PAYMENT_USDC_BASE`, `PAYMENT_USDC_SOL`, `PAYMENT_BTC_ONCHAIN`
 - Providers you will use:
-  - NiceHash: `NICEHASH_API_KEY`, `NICEHASH_API_SECRET`, `NICEHASH_ORG_ID`
+  - NiceHash: `NICEHASH_API_KEY`, `NICEHASH_API_SECRET`, `NICEHASH_ORG_ID` (optional `NICEHASH_API_BASE`)
   - Braiins: `BRAIINS_OWNER_TOKEN` or `BRAIINS_READONLY_TOKEN`
   - Bitties Proxy: `BITTIES_PROXY_BASE` + (`BITTIES_PROXY_TOKEN` or `BITTIES_PROXY_USERNAME`/`BITTIES_PROXY_PASSWORD`)
 
@@ -131,4 +131,3 @@ npm install
 npm run build
 pm2 restart dhr-bot
 ```
-
