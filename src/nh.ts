@@ -53,11 +53,17 @@ export function buildNhOrderParams({
   const priceBtcPerEhDay = (usdPerPhDay / btcPrice) * 1000;
   const limitEh = ph / 1000;
   const amountBtc = priceBtcPerEhDay * limitEh * (hours / 24);
+  const minAmount = m?.minAmount && isFinite(m.minAmount) ? m.minAmount : 0.001;
+
+  // NiceHash order payload rejects overly precise decimals (PRICE_DATA_SCALE / etc).
+  const roundedPrice = Number(priceBtcPerEhDay.toFixed(8));
+  const roundedLimit = Number(limitEh.toFixed(8));
+  const roundedAmount = Number(Math.max(amountBtc, minAmount).toFixed(8));
 
   return {
-    price: priceBtcPerEhDay,
-    limit: limitEh,
-    amount: amountBtc,
+    price: roundedPrice,
+    limit: roundedLimit,
+    amount: roundedAmount,
     market: market.toUpperCase(),
     algo,
   };
@@ -93,10 +99,12 @@ export async function getNhBuyInfo(algo: string = 'SHA256ASICBOOST'): Promise<Nh
     algorithm: entryAlgo,
   }));
   if (markets.length === 0 && Array.isArray(entry?.enabledHashpowerMarkets)) {
-    const marketFactor = Number(entry?.marketFactor ?? entry?.multi ?? 1);
-    const priceFactor = Number(entry?.priceFactor ?? entry?.price_multi ?? 1);
-    const displayMarketFactor = String(entry?.displayMarketFactor ?? entry?.speed_text ?? '1');
-    const displayPriceFactor = String(entry?.displayPriceFactor ?? entry?.price_multi ?? '1');
+    // New buy/info shape does not expose market/price factors in API-create format.
+    // Keep them unset here; order creation can proceed without these optional fields.
+    const marketFactor = 0;
+    const priceFactor = 0;
+    const displayMarketFactor = '';
+    const displayPriceFactor = '';
     const minAmount = Number(entry?.minAmount ?? entry?.min_amount ?? 0);
     const minPrice = Number(entry?.minPrice ?? entry?.min_price ?? 0);
     markets = entry.enabledHashpowerMarkets
