@@ -11,6 +11,7 @@ export interface NhMarketInfo {
   displayPriceFactor: string;
   minAmount?: number;
   minPrice?: number;
+  minLimit?: number;
   fixedPrice?: number;
   algorithm?: string;
 }
@@ -54,6 +55,17 @@ export function buildNhOrderParams({
   if (!isFinite(usdPerPhDay) || usdPerPhDay <= 0) throw new Error('bad usdPerPhDay');
   if (!isFinite(btcPrice) || btcPrice <= 0) throw new Error('bad btcPrice');
 
+  const decimalsFromStep = (step: number, fallback: number): number => {
+    if (!isFinite(step) || step <= 0) return fallback;
+    const s = step.toString().toLowerCase();
+    if (s.includes('e-')) {
+      const n = Number(s.split('e-')[1]);
+      return isFinite(n) && n >= 0 ? n : fallback;
+    }
+    const dot = s.indexOf('.');
+    return dot >= 0 ? Math.max(0, s.length - dot - 1) : 0;
+  };
+
   const marketUpper = market.toUpperCase();
   let m = buyInfo.markets.find((x) => x.market.toUpperCase() === marketUpper || x.market.toUpperCase().startsWith(marketUpper));
   if (!m && buyInfo.markets.length) {
@@ -65,11 +77,16 @@ export function buildNhOrderParams({
   const limitEh = ph / 1000;
   const amountBtc = priceBtcPerEhDay * limitEh * (hours / 24);
   const minAmount = m?.minAmount && isFinite(m.minAmount) ? m.minAmount : 0.001;
+  const minPrice = m?.minPrice && isFinite(m.minPrice) ? m.minPrice : 0.0001;
+  const minLimit = m?.minLimit && isFinite(m.minLimit) ? m.minLimit : 0.001;
+  const priceDecimals = decimalsFromStep(minPrice, 4);
+  const amountDecimals = decimalsFromStep(minAmount, 3);
+  const limitDecimals = decimalsFromStep(minLimit, 3);
 
   // NiceHash order payload rejects overly precise decimals (PRICE_DATA_SCALE / etc).
-  const roundedPrice = Number(priceBtcPerEhDay.toFixed(8));
-  const roundedLimit = Number(limitEh.toFixed(8));
-  const roundedAmount = Number(Math.max(amountBtc, minAmount).toFixed(8));
+  const roundedPrice = Number(Math.max(priceBtcPerEhDay, minPrice).toFixed(priceDecimals));
+  const roundedLimit = Number(Math.max(limitEh, minLimit).toFixed(limitDecimals));
+  const roundedAmount = Number(Math.max(amountBtc, minAmount).toFixed(amountDecimals));
 
   return {
     price: roundedPrice,
@@ -106,6 +123,7 @@ export async function getNhBuyInfo(algo: string = 'SHA256ASICBOOST'): Promise<Nh
     displayPriceFactor: String(m.displayPriceFactor || m.priceDisplayFactor || ''),
     minAmount: Number(m.minAmount || m.minimumAmount || 0),
     minPrice: Number(m.minPrice || m.minimumPrice || 0),
+    minLimit: Number(m.minLimit || m.minimumLimit || 0),
     fixedPrice: Number(m.fixedPrice || m.fixed_price || 0) || undefined,
     algorithm: entryAlgo,
   }));
@@ -118,6 +136,7 @@ export async function getNhBuyInfo(algo: string = 'SHA256ASICBOOST'): Promise<Nh
     const displayPriceFactor = '';
     const minAmount = Number(entry?.minAmount ?? entry?.min_amount ?? 0);
     const minPrice = Number(entry?.minPrice ?? entry?.min_price ?? 0);
+    const minLimit = Number(entry?.minLimit ?? entry?.min_limit ?? 0);
     markets = entry.enabledHashpowerMarkets
       .map((m: any) => String(m || '').toUpperCase())
       .filter(Boolean)
@@ -129,6 +148,7 @@ export async function getNhBuyInfo(algo: string = 'SHA256ASICBOOST'): Promise<Nh
         displayPriceFactor,
         minAmount,
         minPrice,
+        minLimit,
         algorithm: entryAlgo,
       }));
   }

@@ -54,38 +54,25 @@ export async function createNhOrder(opts: {
   const payload: any = {
     market,
     algorithm: 'SHA256ASICBOOST',
-    // Keep fixed precision to satisfy NH data scale validators.
-    price: price.toFixed(8),
-    limit: limit.toFixed(8),
-    amount: amount.toFixed(8),
+    // Keep numeric values quantized in nh.ts to satisfy NH data scale validators.
+    price,
+    limit,
+    amount,
     poolId,
     type: 'STANDARD',
   };
   const displayMarketFactor = marketInfo?.displayMarketFactor || best.displayMarketFactor || 'EH';
   const displayPriceFactor = marketInfo?.displayPriceFactor || best.displayPriceFactor || 'EH';
-  const marketFactor =
-    Number.isFinite(marketInfo?.marketFactor) && (marketInfo?.marketFactor ?? 0) > 0
-      ? marketInfo!.marketFactor
-      : best.marketFactor;
-  const priceFactor =
-    Number.isFinite(marketInfo?.priceFactor) && (marketInfo?.priceFactor ?? 0) > 0
-      ? marketInfo!.priceFactor
-      : best.priceFactor;
-
   payload.displayMarketFactor = displayMarketFactor;
   payload.displayPriceFactor = displayPriceFactor;
-  if (best.marketFactorRaw) {
-    payload.marketFactor = best.marketFactorRaw;
-  } else if (Number.isFinite(marketFactor) && (marketFactor ?? 0) > 0) {
-    payload.marketFactor = Number(marketFactor).toFixed(8);
-  }
-  if (best.priceFactorRaw) {
-    payload.priceFactor = best.priceFactorRaw;
-  } else if (Number.isFinite(priceFactor) && (priceFactor ?? 0) > 0) {
-    payload.priceFactor = Number(priceFactor).toFixed(8);
-  }
 
-  const data: any = await nhPrivateRequest('POST', '/main/api/v2/hashpower/order', { body: payload });
+  let data: any;
+  try {
+    data = await nhPrivateRequest('POST', '/main/api/v2/hashpower/order', { body: payload });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`NH order create failed payload=${JSON.stringify(payload)} cause=${msg}`);
+  }
   const id = data?.id;
   if (!id) throw new Error('order create missing id');
 
