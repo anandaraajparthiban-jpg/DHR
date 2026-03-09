@@ -61,10 +61,25 @@ export async function createNhOrder(opts: {
     poolId,
     type: 'STANDARD',
   };
+  const normalizeFactor = (raw?: string, fallback?: number): string | undefined => {
+    if (raw && raw.trim()) {
+      // Keep full precision but strip no-op trailing zeros after decimal point.
+      return raw.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+    }
+    if (Number.isFinite(fallback) && (fallback ?? 0) > 0) {
+      const n = Number(fallback);
+      return Number.isInteger(n) ? String(n) : n.toFixed(8).replace(/(\.\d*?)0+$/, '$1');
+    }
+    return undefined;
+  };
   const displayMarketFactor = marketInfo?.displayMarketFactor || best.displayMarketFactor || 'EH';
   const displayPriceFactor = marketInfo?.displayPriceFactor || best.displayPriceFactor || 'EH';
+  const marketFactor = normalizeFactor(best.marketFactorRaw, marketInfo?.marketFactor ?? best.marketFactor);
+  const priceFactor = normalizeFactor(best.priceFactorRaw, marketInfo?.priceFactor ?? best.priceFactor);
   payload.displayMarketFactor = displayMarketFactor;
   payload.displayPriceFactor = displayPriceFactor;
+  if (marketFactor) payload.marketFactor = marketFactor;
+  if (priceFactor) payload.priceFactor = priceFactor;
 
   let data: any;
   try {
