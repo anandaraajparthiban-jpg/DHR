@@ -28,6 +28,8 @@ export interface NhMarketQuote {
   displayMarketFactor?: string;
   priceFactor?: number;
   displayPriceFactor?: string;
+  marketFactorRaw?: string;
+  priceFactorRaw?: string;
 }
 
 export function buildNhOrderParams({
@@ -152,6 +154,8 @@ export async function fetchOrderbook(algo: string, market: string): Promise<NhMa
   if (!prices.length) throw new Error(`orderBook ${marketUpper} no prices`);
   const marketFactor = Number(stat?.marketFactor);
   const priceFactor = Number(stat?.priceFactor);
+  const marketFactorRaw = typeof stat?.marketFactor === 'string' ? stat.marketFactor : undefined;
+  const priceFactorRaw = typeof stat?.priceFactor === 'string' ? stat.priceFactor : undefined;
   const displayMarketFactor = typeof stat?.displayMarketFactor === 'string' ? stat.displayMarketFactor : undefined;
   const displayPriceFactor = typeof stat?.displayPriceFactor === 'string' ? stat.displayPriceFactor : undefined;
   return {
@@ -161,6 +165,8 @@ export async function fetchOrderbook(algo: string, market: string): Promise<NhMa
     displayMarketFactor,
     priceFactor: isFinite(priceFactor) && priceFactor > 0 ? priceFactor : undefined,
     displayPriceFactor,
+    marketFactorRaw,
+    priceFactorRaw,
   };
 }
 

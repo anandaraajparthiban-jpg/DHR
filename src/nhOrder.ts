@@ -54,9 +54,10 @@ export async function createNhOrder(opts: {
   const payload: any = {
     market,
     algorithm: 'SHA256ASICBOOST',
-    price,
-    limit,
-    amount,
+    // Keep fixed precision to satisfy NH data scale validators.
+    price: price.toFixed(8),
+    limit: limit.toFixed(8),
+    amount: amount.toFixed(8),
     poolId,
     type: 'STANDARD',
   };
@@ -73,8 +74,16 @@ export async function createNhOrder(opts: {
 
   payload.displayMarketFactor = displayMarketFactor;
   payload.displayPriceFactor = displayPriceFactor;
-  if (Number.isFinite(marketFactor) && (marketFactor ?? 0) > 0) payload.marketFactor = marketFactor;
-  if (Number.isFinite(priceFactor) && (priceFactor ?? 0) > 0) payload.priceFactor = priceFactor;
+  if (best.marketFactorRaw) {
+    payload.marketFactor = best.marketFactorRaw;
+  } else if (Number.isFinite(marketFactor) && (marketFactor ?? 0) > 0) {
+    payload.marketFactor = Number(marketFactor).toFixed(8);
+  }
+  if (best.priceFactorRaw) {
+    payload.priceFactor = best.priceFactorRaw;
+  } else if (Number.isFinite(priceFactor) && (priceFactor ?? 0) > 0) {
+    payload.priceFactor = Number(priceFactor).toFixed(8);
+  }
 
   const data: any = await nhPrivateRequest('POST', '/main/api/v2/hashpower/order', { body: payload });
   const id = data?.id;
