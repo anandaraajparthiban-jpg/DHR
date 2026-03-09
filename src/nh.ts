@@ -86,7 +86,15 @@ export function buildNhOrderParams({
   // NiceHash order payload rejects overly precise decimals (PRICE_DATA_SCALE / etc).
   const roundedPrice = Number(Math.max(priceBtcPerEhDay, minPrice).toFixed(priceDecimals));
   const roundedLimit = Number(Math.max(limitEh, minLimit).toFixed(limitDecimals));
-  const roundedAmount = Number(Math.max(amountBtc, minAmount).toFixed(amountDecimals));
+  const roundedAmount = Number(amountBtc.toFixed(amountDecimals));
+  if (roundedAmount < minAmount) {
+    const minHours = (minAmount / (roundedPrice * roundedLimit)) * 24;
+    throw new Error(
+      `Requested NiceHash order too small: amount ${roundedAmount.toFixed(amountDecimals)} BTC is below minimum ${minAmount.toFixed(
+        amountDecimals
+      )} BTC for current market. Increase PH/hours (approx minimum hours at this PH: ${minHours.toFixed(2)}h).`
+    );
+  }
 
   return {
     price: roundedPrice,

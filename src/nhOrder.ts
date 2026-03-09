@@ -95,5 +95,13 @@ export async function createNhOrder(opts: {
 }
 
 export async function cancelNhOrder(orderId: string): Promise<void> {
-  await nhPrivateRequest('DELETE', `/main/api/v2/hashpower/order/${encodeURIComponent(orderId)}`);
+  try {
+    await nhPrivateRequest('DELETE', `/main/api/v2/hashpower/order/${encodeURIComponent(orderId)}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('http 404') || msg.toLowerCase().includes('not found')) {
+      return;
+    }
+    throw err;
+  }
 }
