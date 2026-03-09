@@ -107,8 +107,8 @@ Pass criteria:
 ## 6) Discord Command Smoke Tests
 
 From Discord:
-1. `/quote ph:1 hours:1 provider:bitties_proxy`
-2. `/rent ph:1 hours:1 provider:bitties_proxy pool:stratum+tcp://... worker:testworker`
+1. `/quote ph:1 hours:1`
+2. `/rent ph:1 hours:1 pool:stratum+tcp://... worker:testworker`
 3. `/payment_status id:<order-id>`
 4. `/verify_payments_debug limit:5` (admin)
 
@@ -134,30 +134,15 @@ Pass criteria:
 
 ## 8) Provider Fulfillment Gates
 
-## 8.1 Bitties Proxy
-- Submit a Bitties order.
-- Confirm pool created in Bitties API/admin.
-- Wait expiry or force cancel path.
-
-Pass criteria:
-- create succeeds
-- terminate succeeds
-- order becomes `complete`
-- user receives start/end DM
-
-## 8.2 NiceHash
+## 8.1 NiceHash (initial release)
 - Submit NiceHash order and verify order ID saved.
 
 Pass criteria:
 - NH placement succeeds
 - cancellation at expiry succeeds
 
-## 8.3 Braiins (if enabled)
-- Submit Braiins order with valid token.
-
-Pass criteria:
-- bid/order placement succeeds
-- no persistent 404/auth errors
+## 8.2 Other providers
+- Braiins/Bitties checks are optional for this release because runtime is hardcoded to NiceHash.
 
 ## 9) Safety Controls
 
@@ -206,4 +191,3 @@ Sign-off:
 - Engineering:
 - Operations:
 - Product/Owner:
-

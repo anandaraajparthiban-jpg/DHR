@@ -22,7 +22,7 @@ interface QuoteResult {
   bufferUsdPerPhDay: number;
 }
 
-const marginBps = Number(process.env.PRICE_MARGIN_BPS ?? '100'); // default 1%
+const marginBps = Number(process.env.PRICE_MARGIN_BPS ?? '1000'); // default 10%
 const bufferBps = Number(process.env.BETA_BUFFER_BPS ?? '1000'); // default 10%
 const floorUsdPerPhDay = Number(process.env.FLOOR_USD_PER_PH_DAY ?? '0');
 const nhFeeBps = Number(process.env.NICEHASH_FEE_BPS ?? '200'); // default 2%

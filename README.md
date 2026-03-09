@@ -2,11 +2,11 @@
 
 ## What’s working
 - Discord bot with slash commands: /quote, /rent, /status, /cancel, /payment_status, /mark_paid (admin), /verify_payments (admin).
-- Quotes: price from NiceHash + Braiins with fee/margin/buffer breakdown; BTC price fallback; pool validation and size/duration caps; payment instructions (USDC Base, USDC Solana, BTC); buffer baked in and shown.
-- Quotes can also use a static internal fallback via `INTERNAL_CAPACITY_USD_PER_PH_DAY` when external markets are unavailable.
+- Quotes: NiceHash price with fee/margin/buffer breakdown; BTC price fallback; pool validation and size/duration caps; payment instructions (USDC Base, USDC Solana, BTC); buffer baked in and shown.
+- NiceHash quotes are required in this initial release; non-NiceHash fallback sources are not used by commands.
 - Persistence: runtime-selectable DB backend (`sqlite` default, or `postgres` via env) for orders/payment state.
-- Provider selection: users choose provider at rent time (`NiceHash`, `Braiins`, or `Bitties Proxy`).
-- Fulfillment: selected provider is respected at activation time (no cross-provider fallback unless changed in code).
+- Provider (initial release): hardcoded to `NiceHash` for quoting and fulfillment.
+- Fulfillment: all new orders activate on NiceHash.
 - Fulfillment safety: DB-backed state transition (`payment_required|pending -> fulfilling -> active`) prevents duplicate provider placements from concurrent activation attempts.
 - Payments: each order gets a payment intent with unique amounts + reference; verifier loop confirms BTC, USDC on Base (ERC20 logs), and USDC on Solana (SPL token balance deltas).
 - Auto-start after payment: confirmed payments can auto-activate orders (`AUTO_ACTIVATE_ON_PAYMENT=true`).
@@ -22,12 +22,12 @@
 - MiningRigRentals integration: not yet integrated; consider adding as provider/fallback.
 
 ## Commands (current)
-- `/quote ph:<number> hours:<int> provider:<nicehash|braiins|bitties_proxy?>` — price with breakdown.
-- `/rent ph:<number> hours:<int> provider:<nicehash|braiins|bitties_proxy> pool:<stratum url> worker:<name>` — place order with selected provider.
+- `/quote ph:<number> hours:<int>` — price with breakdown (NiceHash source).
+- `/rent ph:<number> hours:<int> pool:<stratum url> worker:<name>` — place order (NiceHash fulfillment).
 - `/status id:<order-id>` — check status (DB-backed).
 - `/cancel id:<order-id>` — cancel if not active.
 - `/payment_status id:<order-id>` — see payment intent status + expected amounts/reference.
-- `/mark_paid id:<order-id>` — admin only; activates using the order’s selected provider.
+- `/mark_paid id:<order-id>` — admin only; activates on NiceHash.
 - `/verify_payments` — admin only; run payment verification tick immediately.
 - `/verify_payments_debug limit:<1-20?>` — admin only; diagnostic reasons for payment-match decisions.
 

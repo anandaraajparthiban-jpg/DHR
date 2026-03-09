@@ -7,7 +7,7 @@ This manual explains how to use the Discord Hashrate Rental (DHR) bot as a custo
 DHR lets a user:
 - choose hashrate (`PH`)
 - choose duration (`hours`)
-- choose provider (`nicehash`, `braiins`, or `bitties_proxy`)
+- use provider (`nicehash`, hardcoded for this initial release)
 - choose pool URL and worker name
 - receive payment instructions
 - start automatically after payment confirmation
@@ -24,12 +24,12 @@ Admin access is controlled by `ADMIN_USER_IDS` in `.env`.
 
 1. Request a quote:
 ```text
-/quote ph:1 hours:12 provider:bitties_proxy
+/quote ph:1 hours:12
 ```
 
 2. Create an order:
 ```text
-/rent ph:1 hours:12 provider:bitties_proxy pool:stratum+tcp://pool.example.com:3333 worker:myworker
+/rent ph:1 hours:12 pool:stratum+tcp://pool.example.com:3333 worker:myworker
 ```
 
 3. Pay exactly the shown amount to one of:
@@ -53,11 +53,10 @@ Purpose: preview price before ordering.
 Parameters:
 - `ph` (number, required): requested PH
 - `hours` (int, required): rental duration
-- `provider` (optional): `nicehash | braiins | bitties_proxy`
 
 Example:
 ```text
-/quote ph:2.5 hours:24 provider:nicehash
+/quote ph:2.5 hours:24
 ```
 
 ## 4.2 `/rent`
@@ -66,17 +65,15 @@ Purpose: create an order and receive payment instructions.
 Parameters:
 - `ph` (number, required)
 - `hours` (int, required)
-- `provider` (required): `nicehash | braiins | bitties_proxy`
 - `pool` (required): pool URL
 - `worker` (required): worker string
 
 Example:
 ```text
-/rent ph:1.5 hours:8 provider:bitties_proxy pool:stratum+tcp://pool.example.com:3333 worker:user001
+/rent ph:1.5 hours:8 pool:stratum+tcp://pool.example.com:3333 worker:user001
 ```
 
 Notes:
-- For `bitties_proxy`, pool URL must start with `stratum+tcp://`.
 - Pool must pass allowlist/validation configured by operator.
 
 ## 4.3 `/status`
@@ -164,13 +161,8 @@ Important:
 ## 8.1 NiceHash
 - Requires valid NiceHash API credentials and sufficient balance.
 
-## 8.2 Braiins
-- Requires valid Braiins token and working spot API access.
-
-## 8.3 Bitties Proxy
-- Requires configured API endpoint and auth.
-- Uses pool create/delete API flow.
-- Only supports `stratum+tcp://` pool URLs in this bot flow.
+## 8.2 Braiins / 8.3 Bitties Proxy
+- Not used in initial release runtime path.
 
 ## 9. Common Errors and Fixes
 
@@ -214,4 +206,3 @@ Then run:
 - Review logs daily for repeated provider or RPC errors.
 - Keep `ALLOWED_POOLS` strict.
 - Keep `ADMIN_USER_IDS` minimal.
-
