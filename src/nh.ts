@@ -48,8 +48,7 @@ export function buildNhOrderParams({
   if (!m && buyInfo.markets.length) {
     m = buyInfo.markets[0];
   }
-  if (!m) throw new Error(`market ${marketUpper} not in buyInfo and no fallback`);
-  market = m.market;
+  market = m ? m.market : marketUpper;
 
   const priceBtcPerEhDay = (usdPerPhDay / btcPrice) * 1000;
   const limitEh = ph / 1000;
@@ -81,7 +80,8 @@ export async function getNhBuyInfo(algo: string = 'SHA256ASICBOOST'): Promise<Nh
   const entry = algos.find((a) => algoCode(a).toUpperCase() === algo.toUpperCase());
   if (!entry) throw new Error(`algo ${algo} not found in buy/info`);
   const entryAlgo = algoCode(entry);
-  const markets: NhMarketInfo[] = (entry?.markets || entry?.market || []).map((m: any) => ({
+  const legacyMarkets = Array.isArray(entry?.markets) ? entry.markets : Array.isArray(entry?.market) ? entry.market : [];
+  let markets: NhMarketInfo[] = legacyMarkets.map((m: any) => ({
     market: String(m.market || m.name || '').toUpperCase(),
     marketFactor: Number(m.marketFactor || m.factor || m.market_factor || 0),
     displayMarketFactor: String(m.displayMarketFactor || m.marketDisplayFactor || ''),
@@ -92,6 +92,27 @@ export async function getNhBuyInfo(algo: string = 'SHA256ASICBOOST'): Promise<Nh
     fixedPrice: Number(m.fixedPrice || m.fixed_price || 0) || undefined,
     algorithm: entryAlgo,
   }));
+  if (markets.length === 0 && Array.isArray(entry?.enabledHashpowerMarkets)) {
+    const marketFactor = Number(entry?.marketFactor ?? entry?.multi ?? 1);
+    const priceFactor = Number(entry?.priceFactor ?? entry?.price_multi ?? 1);
+    const displayMarketFactor = String(entry?.displayMarketFactor ?? entry?.speed_text ?? '1');
+    const displayPriceFactor = String(entry?.displayPriceFactor ?? entry?.price_multi ?? '1');
+    const minAmount = Number(entry?.minAmount ?? entry?.min_amount ?? 0);
+    const minPrice = Number(entry?.minPrice ?? entry?.min_price ?? 0);
+    markets = entry.enabledHashpowerMarkets
+      .map((m: any) => String(m || '').toUpperCase())
+      .filter(Boolean)
+      .map((market: string) => ({
+        market,
+        marketFactor,
+        displayMarketFactor,
+        priceFactor,
+        displayPriceFactor,
+        minAmount,
+        minPrice,
+        algorithm: entryAlgo,
+      }));
+  }
   return { algo: entryAlgo, markets, raw: data };
 }
 

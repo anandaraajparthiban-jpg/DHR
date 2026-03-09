@@ -40,8 +40,7 @@ export async function createNhOrder(opts: {
     buyInfo,
   });
 
-  const marketInfo = buyInfo.markets.find((m) => m.market === market);
-  if (!marketInfo) throw new Error(`market ${market} missing in buyInfo`);
+  const marketInfo = buyInfo.markets.find((m) => m.market === market || m.market.toUpperCase().startsWith(market.toUpperCase()));
 
   const poolId = await ensurePool({
     algorithm: 'SHA256ASICBOOST',
@@ -52,7 +51,7 @@ export async function createNhOrder(opts: {
     name: `auto-${worker}-${host}`,
   });
 
-  const payload = {
+  const payload: any = {
     market,
     algorithm: 'SHA256ASICBOOST',
     price,
@@ -60,11 +59,13 @@ export async function createNhOrder(opts: {
     amount,
     poolId,
     type: 'STANDARD',
-    displayMarketFactor: marketInfo.displayMarketFactor,
-    marketFactor: marketInfo.marketFactor,
-    displayPriceFactor: marketInfo.displayPriceFactor,
-    priceFactor: marketInfo.priceFactor,
   };
+  if (marketInfo) {
+    if (marketInfo.displayMarketFactor) payload.displayMarketFactor = marketInfo.displayMarketFactor;
+    if (Number.isFinite(marketInfo.marketFactor) && marketInfo.marketFactor > 0) payload.marketFactor = marketInfo.marketFactor;
+    if (marketInfo.displayPriceFactor) payload.displayPriceFactor = marketInfo.displayPriceFactor;
+    if (Number.isFinite(marketInfo.priceFactor) && marketInfo.priceFactor > 0) payload.priceFactor = marketInfo.priceFactor;
+  }
 
   const data: any = await nhPrivateRequest('POST', '/main/api/v2/hashpower/order', { body: payload });
   const id = data?.id;
