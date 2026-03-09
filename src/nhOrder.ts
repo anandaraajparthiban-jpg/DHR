@@ -60,12 +60,21 @@ export async function createNhOrder(opts: {
     poolId,
     type: 'STANDARD',
   };
-  if (marketInfo) {
-    if (marketInfo.displayMarketFactor) payload.displayMarketFactor = marketInfo.displayMarketFactor;
-    if (Number.isFinite(marketInfo.marketFactor) && marketInfo.marketFactor > 0) payload.marketFactor = marketInfo.marketFactor;
-    if (marketInfo.displayPriceFactor) payload.displayPriceFactor = marketInfo.displayPriceFactor;
-    if (Number.isFinite(marketInfo.priceFactor) && marketInfo.priceFactor > 0) payload.priceFactor = marketInfo.priceFactor;
-  }
+  const displayMarketFactor = marketInfo?.displayMarketFactor || best.displayMarketFactor || 'EH';
+  const displayPriceFactor = marketInfo?.displayPriceFactor || best.displayPriceFactor || 'EH';
+  const marketFactor =
+    Number.isFinite(marketInfo?.marketFactor) && (marketInfo?.marketFactor ?? 0) > 0
+      ? marketInfo!.marketFactor
+      : best.marketFactor;
+  const priceFactor =
+    Number.isFinite(marketInfo?.priceFactor) && (marketInfo?.priceFactor ?? 0) > 0
+      ? marketInfo!.priceFactor
+      : best.priceFactor;
+
+  payload.displayMarketFactor = displayMarketFactor;
+  payload.displayPriceFactor = displayPriceFactor;
+  if (Number.isFinite(marketFactor) && (marketFactor ?? 0) > 0) payload.marketFactor = marketFactor;
+  if (Number.isFinite(priceFactor) && (priceFactor ?? 0) > 0) payload.priceFactor = priceFactor;
 
   const data: any = await nhPrivateRequest('POST', '/main/api/v2/hashpower/order', { body: payload });
   const id = data?.id;

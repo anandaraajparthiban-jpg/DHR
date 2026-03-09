@@ -21,6 +21,15 @@ export interface NhBuyInfo {
   raw: any;
 }
 
+export interface NhMarketQuote {
+  market: string;
+  btcPerEhDay: number;
+  marketFactor?: number;
+  displayMarketFactor?: string;
+  priceFactor?: number;
+  displayPriceFactor?: string;
+}
+
 export function buildNhOrderParams({
   ph,
   hours,
@@ -124,7 +133,7 @@ export async function getNhBuyInfo(algo: string = 'SHA256ASICBOOST'): Promise<Nh
   return { algo: entryAlgo, markets, raw: data };
 }
 
-export async function fetchOrderbook(algo: string, market: string): Promise<number> {
+export async function fetchOrderbook(algo: string, market: string): Promise<NhMarketQuote> {
   const data: any = await nhPublicRequest('/main/api/v2/hashpower/orderBook', {
     algorithm: algo,
     market,
@@ -133,24 +142,36 @@ export async function fetchOrderbook(algo: string, market: string): Promise<numb
   });
 
   const marketUpper = market.toUpperCase();
-  const orders = data?.stats?.[marketUpper]?.orders || data?.stats?.orders || data?.orderList || [];
+  const stat = data?.stats?.[marketUpper] ?? data?.stats;
+  const orders = stat?.orders || data?.orderList || [];
   const prices = Array.isArray(orders)
     ? orders
         .map((o: any) => Number(o.price))
         .filter((n: number) => !isNaN(n))
     : [];
   if (!prices.length) throw new Error(`orderBook ${marketUpper} no prices`);
-  return Math.min(...prices);
+  const marketFactor = Number(stat?.marketFactor);
+  const priceFactor = Number(stat?.priceFactor);
+  const displayMarketFactor = typeof stat?.displayMarketFactor === 'string' ? stat.displayMarketFactor : undefined;
+  const displayPriceFactor = typeof stat?.displayPriceFactor === 'string' ? stat.displayPriceFactor : undefined;
+  return {
+    market: marketUpper,
+    btcPerEhDay: Math.min(...prices),
+    marketFactor: isFinite(marketFactor) && marketFactor > 0 ? marketFactor : undefined,
+    displayMarketFactor,
+    priceFactor: isFinite(priceFactor) && priceFactor > 0 ? priceFactor : undefined,
+    displayPriceFactor,
+  };
 }
 
-export async function getNhBestMarketPrice(algo: string = 'SHA256ASICBOOST'): Promise<{ market: string; btcPerEhDay: number }> {
+export async function getNhBestMarketPrice(algo: string = 'SHA256ASICBOOST'): Promise<NhMarketQuote> {
   const markets = ['USA', 'EU'];
-  const priced: Array<{ market: string; btcPerEhDay: number }> = [];
+  const priced: NhMarketQuote[] = [];
 
   for (const market of markets) {
     try {
-      const btcPerEhDay = await fetchOrderbook(algo, market);
-      priced.push({ market, btcPerEhDay });
+      const quote = await fetchOrderbook(algo, market);
+      priced.push(quote);
     } catch {
       // ignore individual market fetch failures
     }
