@@ -39,6 +39,9 @@ export async function createNhOrder(opts: {
     btcPrice,
     buyInfo,
   });
+  const priceFloorMult = Math.max(1, Number(process.env.NICEHASH_ORDERBOOK_PREMIUM_MULT ?? '1.03'));
+  const priceFromBook = Number((best.btcPerEhDay * priceFloorMult).toFixed(4));
+  const finalPrice = Math.max(price, priceFromBook);
 
   const marketInfo = buyInfo.markets.find((m) => m.market === market || m.market.toUpperCase().startsWith(market.toUpperCase()));
 
@@ -55,7 +58,7 @@ export async function createNhOrder(opts: {
     market,
     algorithm: 'SHA256ASICBOOST',
     // Keep numeric values quantized in nh.ts to satisfy NH data scale validators.
-    price,
+    price: finalPrice,
     limit,
     amount,
     poolId,
@@ -91,7 +94,7 @@ export async function createNhOrder(opts: {
   const id = data?.id;
   if (!id) throw new Error('order create missing id');
 
-  return { id: String(id), market, price, limit, amount, poolId };
+  return { id: String(id), market, price: finalPrice, limit, amount, poolId };
 }
 
 export async function cancelNhOrder(orderId: string): Promise<void> {

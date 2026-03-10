@@ -173,9 +173,15 @@ export async function fetchOrderbook(algo: string, market: string): Promise<NhMa
 
   const marketUpper = market.toUpperCase();
   const stat = data?.stats?.[marketUpper] ?? data?.stats;
-  const orders = stat?.orders || data?.orderList || [];
-  const prices = Array.isArray(orders)
-    ? orders
+  const ordersRaw = stat?.orders || data?.orderList || [];
+  const orders = Array.isArray(ordersRaw) ? ordersRaw : [];
+  const standardAliveOrders = orders.filter(
+    (o: any) => String(o?.type || '').toUpperCase() === 'STANDARD' && Boolean(o?.alive ?? true)
+  );
+  const aliveOrders = orders.filter((o: any) => Boolean(o?.alive ?? true));
+  const candidateOrders = standardAliveOrders.length > 0 ? standardAliveOrders : aliveOrders.length > 0 ? aliveOrders : orders;
+  const prices = Array.isArray(candidateOrders)
+    ? candidateOrders
         .map((o: any) => Number(o.price))
         .filter((n: number) => !isNaN(n))
     : [];

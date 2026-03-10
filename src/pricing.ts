@@ -133,22 +133,33 @@ async function quoteNicehash(input: QuoteInput, feeBps: number): Promise<QuoteRe
   }
   try {
     // Use public orderBook for SHA256ASICBOOST; price is BTC/TH/day. Convert to USD/PH/day.
-    const res = await fetch('https://api2.nicehash.com/main/api/v2/hashpower/orderBook?algorithm=SHA256ASICBOOST&page=0&pageSize=10');
+    const res = await fetch('https://api2.nicehash.com/main/api/v2/hashpower/orderBook?algorithm=SHA256ASICBOOST&page=0&pageSize=50');
     if (!res.ok) throw new Error('nicehash orderBook failed');
     const data: any = await res.json();
     const marketObjs = data?.stats && typeof data.stats === 'object' ? Object.values(data.stats) : [];
-    const orders = Array.isArray(data?.orderList)
-      ? data.orderList
-      : Array.isArray(marketObjs)
-        ? marketObjs.flatMap((m: any) => (m?.orders ?? []))
+    const marketBestPrices =
+      Array.isArray(marketObjs) && marketObjs.length > 0
+        ? marketObjs
+            .map((m: any) => {
+              const orders = Array.isArray(m?.orders) ? m.orders : [];
+              const standardAlive = orders.filter(
+                (o: any) => String(o?.type || '').toUpperCase() === 'STANDARD' && Boolean(o?.alive ?? true)
+              );
+              const aliveAny = orders.filter((o: any) => Boolean(o?.alive ?? true));
+              const candidates = standardAlive.length > 0 ? standardAlive : aliveAny.length > 0 ? aliveAny : orders;
+              const prices = candidates
+                .map((o: any) => Number(o.price))
+                .filter((n: number) => !isNaN(n));
+              return prices.length > 0 ? Math.min(...prices) : undefined;
+            })
+            .filter((n: number | undefined): n is number => typeof n === 'number' && isFinite(n))
         : [];
-    const prices = Array.isArray(orders)
-      ? orders
-          .map((o: any) => Number(o.price))
-          .filter((n: number) => !isNaN(n))
-      : [];
-    if (prices.length === 0) throw new Error('no prices');
-    const bestBtcPerEhDay = Math.min(...prices); // NiceHash orderbook price is BTC per EH/day
+    const fallbackOrders = Array.isArray(data?.orderList) ? data.orderList : [];
+    const fallbackPrices = fallbackOrders.map((o: any) => Number(o.price)).filter((n: number) => !isNaN(n));
+    const rawBest = marketBestPrices.length > 0 ? Math.min(...marketBestPrices) : fallbackPrices.length > 0 ? Math.min(...fallbackPrices) : NaN;
+    if (!isFinite(rawBest)) throw new Error('no prices');
+    const premiumMult = Math.max(1, Number(process.env.NICEHASH_ORDERBOOK_PREMIUM_MULT ?? '1.03'));
+    const bestBtcPerEhDay = rawBest * premiumMult; // keep quote aligned with likely fill price
     const btcPrice = await btcUsd();
     const baseUsdPerPhDay = (bestBtcPerEhDay / 1000) * btcPrice; // EH -> PH
     const feeMult = 1 + feeBps / 10_000;
