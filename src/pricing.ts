@@ -137,16 +137,24 @@ async function quoteNicehash(input: QuoteInput, feeBps: number): Promise<QuoteRe
     if (!res.ok) throw new Error('nicehash orderBook failed');
     const data: any = await res.json();
     const marketObjs = data?.stats && typeof data.stats === 'object' ? Object.values(data.stats) : [];
+    const n = (v: any): number => {
+      const x = Number(v);
+      return isFinite(x) ? x : 0;
+    };
     const marketBestPrices =
       Array.isArray(marketObjs) && marketObjs.length > 0
         ? marketObjs
             .map((m: any) => {
               const orders = Array.isArray(m?.orders) ? m.orders : [];
-              const standardAlive = orders.filter(
-                (o: any) => String(o?.type || '').toUpperCase() === 'STANDARD' && Boolean(o?.alive ?? true)
+              const businessAlive = orders.filter(
+                (o: any) => String(o?.type || '').toUpperCase() === 'BUSINESS' && Boolean(o?.alive ?? true)
+              );
+              const activeSpeedAlive = orders.filter(
+                (o: any) => Boolean(o?.alive ?? true) && (n(o?.payingSpeed) > 0 || n(o?.acceptedSpeed) > 0 || n(o?.rigsCount) > 0)
               );
               const aliveAny = orders.filter((o: any) => Boolean(o?.alive ?? true));
-              const candidates = standardAlive.length > 0 ? standardAlive : aliveAny.length > 0 ? aliveAny : orders;
+              const candidates =
+                businessAlive.length > 0 ? businessAlive : activeSpeedAlive.length > 0 ? activeSpeedAlive : aliveAny.length > 0 ? aliveAny : orders;
               const prices = candidates
                 .map((o: any) => Number(o.price))
                 .filter((n: number) => !isNaN(n));
@@ -158,7 +166,7 @@ async function quoteNicehash(input: QuoteInput, feeBps: number): Promise<QuoteRe
     const fallbackPrices = fallbackOrders.map((o: any) => Number(o.price)).filter((n: number) => !isNaN(n));
     const rawBest = marketBestPrices.length > 0 ? Math.min(...marketBestPrices) : fallbackPrices.length > 0 ? Math.min(...fallbackPrices) : NaN;
     if (!isFinite(rawBest)) throw new Error('no prices');
-    const premiumMult = Math.max(1, Number(process.env.NICEHASH_ORDERBOOK_PREMIUM_MULT ?? '1.03'));
+    const premiumMult = Math.max(1, Number(process.env.NICEHASH_ORDERBOOK_PREMIUM_MULT ?? '1.005'));
     const bestBtcPerEhDay = rawBest * premiumMult; // keep quote aligned with likely fill price
     const btcPrice = await btcUsd();
     const baseUsdPerPhDay = (bestBtcPerEhDay / 1000) * btcPrice; // EH -> PH

@@ -175,11 +175,19 @@ export async function fetchOrderbook(algo: string, market: string): Promise<NhMa
   const stat = data?.stats?.[marketUpper] ?? data?.stats;
   const ordersRaw = stat?.orders || data?.orderList || [];
   const orders = Array.isArray(ordersRaw) ? ordersRaw : [];
-  const standardAliveOrders = orders.filter(
-    (o: any) => String(o?.type || '').toUpperCase() === 'STANDARD' && Boolean(o?.alive ?? true)
+  const n = (v: any): number => {
+    const x = Number(v);
+    return isFinite(x) ? x : 0;
+  };
+  const businessAlive = orders.filter(
+    (o: any) => String(o?.type || '').toUpperCase() === 'BUSINESS' && Boolean(o?.alive ?? true)
+  );
+  const activeSpeedAlive = orders.filter(
+    (o: any) => Boolean(o?.alive ?? true) && (n(o?.payingSpeed) > 0 || n(o?.acceptedSpeed) > 0 || n(o?.rigsCount) > 0)
   );
   const aliveOrders = orders.filter((o: any) => Boolean(o?.alive ?? true));
-  const candidateOrders = standardAliveOrders.length > 0 ? standardAliveOrders : aliveOrders.length > 0 ? aliveOrders : orders;
+  const candidateOrders =
+    businessAlive.length > 0 ? businessAlive : activeSpeedAlive.length > 0 ? activeSpeedAlive : aliveOrders.length > 0 ? aliveOrders : orders;
   const prices = Array.isArray(candidateOrders)
     ? candidateOrders
         .map((o: any) => Number(o.price))

@@ -39,7 +39,7 @@ export async function createNhOrder(opts: {
     btcPrice,
     buyInfo,
   });
-  const priceFloorMult = Math.max(1, Number(process.env.NICEHASH_ORDERBOOK_PREMIUM_MULT ?? '1.03'));
+  const priceFloorMult = Math.max(1, Number(process.env.NICEHASH_ORDERBOOK_PREMIUM_MULT ?? '1.005'));
   const priceFromBook = Number((best.btcPerEhDay * priceFloorMult).toFixed(4));
   const finalPrice = Math.max(price, priceFromBook);
 
