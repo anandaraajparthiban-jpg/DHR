@@ -252,6 +252,26 @@ function envTrimmed(name: string): string | undefined {
   return value.length > 0 ? value : undefined;
 }
 
+function envFirst(names: readonly string[]): string | undefined {
+  for (const n of names) {
+    const v = envTrimmed(n);
+    if (v) return v;
+  }
+  return undefined;
+}
+
+function paymentUsdcBaseAddress(): string | undefined {
+  return envFirst(['PAYMENT_USDC_BASE', 'PAYMENT_USDC_BASE_ADDRESS', 'USDC_BASE_ADDRESS']);
+}
+
+function paymentUsdcSolAddress(): string | undefined {
+  return envFirst(['PAYMENT_USDC_SOL', 'PAYMENT_USDC_SOL_ADDRESS', 'USDC_SOL_ADDRESS']);
+}
+
+function paymentBtcAddress(): string | undefined {
+  return envFirst(['PAYMENT_BTC_ONCHAIN', 'PAYMENT_BTC_ADDRESS', 'BTC_ONCHAIN_ADDRESS']);
+}
+
 async function notifyUser(userId: string, message: string) {
   try {
     const user = await client.users.fetch(userId);
@@ -494,6 +514,17 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
     marginLineBps,
     bufferLine,
   ];
+  const quoteUsdcBaseAddr = paymentUsdcBaseAddress();
+  const quoteUsdcSolAddr = paymentUsdcSolAddress();
+  const quoteBtcAddr = paymentBtcAddress();
+  lines.push('Estimated payment methods (exact unique amount is generated at /rent):');
+  lines.push(`USDC (Base): ${quoteUsdcBaseAddr ?? 'not configured'} (est amount: ${q.totalUsd.toFixed(6)} USDC)`);
+  lines.push(`USDC (Solana): ${quoteUsdcSolAddr ?? 'not configured'} (est amount: ${q.totalUsd.toFixed(6)} USDC)`);
+  lines.push(
+    `BTC on-chain: ${quoteBtcAddr ?? 'not configured'}${
+      isFinite(btcPrice) && btcPrice > 0 ? ` (est amount: ${(q.totalUsd / btcPrice).toFixed(8)} BTC)` : ''
+    }`
+  );
   await interaction.reply({ content: lines.join('\n'), ephemeral: true });
 }
 
@@ -593,24 +624,16 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
     expiresAt: order.expiresAt ?? Date.now() + hours * 3600 * 1000,
   });
 
-  const usdcAddr = envTrimmed('PAYMENT_USDC_BASE');
-  const usdcSolAddr = envTrimmed('PAYMENT_USDC_SOL');
-  const btcAddr = envTrimmed('PAYMENT_BTC_ONCHAIN');
+  const usdcAddr = paymentUsdcBaseAddress();
+  const usdcSolAddr = paymentUsdcSolAddress();
+  const btcAddr = paymentBtcAddress();
   const expiryIso = new Date(payment.expiresAt).toISOString();
 
-  const paymentMethods: string[] = [];
-  if (usdcAddr) {
-    paymentMethods.push(`USDC (Base): ${usdcAddr} (amount: ${payment.usdcBaseAmount.toFixed(6)} USDC)`);
-  }
-  if (usdcSolAddr) {
-    paymentMethods.push(`USDC (Solana): ${usdcSolAddr} (amount: ${payment.usdcSolAmount.toFixed(6)} USDC)`);
-  }
-  if (btcAddr) {
-    paymentMethods.push(`BTC on-chain: ${btcAddr}` + (payment.btcAmount ? ` (amount: ${payment.btcAmount.toFixed(8)} BTC)` : ''));
-  }
-  if (paymentMethods.length === 0) {
-    paymentMethods.push('No payment address is configured. Contact admin.');
-  }
+  const paymentMethods: string[] = [
+    `USDC (Base): ${usdcAddr ?? 'not configured'} (amount: ${payment.usdcBaseAmount.toFixed(6)} USDC)`,
+    `USDC (Solana): ${usdcSolAddr ?? 'not configured'} (amount: ${payment.usdcSolAmount.toFixed(6)} USDC)`,
+    `BTC on-chain: ${btcAddr ?? 'not configured'}${payment.btcAmount ? ` (amount: ${payment.btcAmount.toFixed(8)} BTC)` : ''}`,
+  ];
 
   const lines = [
     `Order ${order.id} accepted. Status: ${order.status}. Provider selected: ${providerLabel(provider)}.`,
@@ -732,9 +755,9 @@ async function handlePaymentStatus(interaction: ChatInputCommandInteraction) {
   const lines = [
     `Order ${id} payment status: ${p.status}`,
     `Reference: ${p.reference}`,
-    `USDC (Base): ${envTrimmed('PAYMENT_USDC_BASE') ?? 'not configured'} (amount: ${p.usdcBaseAmount.toFixed(6)} USDC)`,
-    `USDC (Solana): ${envTrimmed('PAYMENT_USDC_SOL') ?? 'not configured'} (amount: ${p.usdcSolAmount.toFixed(6)} USDC)`,
-    `BTC on-chain: ${envTrimmed('PAYMENT_BTC_ONCHAIN') ?? 'not configured'}${
+    `USDC (Base): ${paymentUsdcBaseAddress() ?? 'not configured'} (amount: ${p.usdcBaseAmount.toFixed(6)} USDC)`,
+    `USDC (Solana): ${paymentUsdcSolAddress() ?? 'not configured'} (amount: ${p.usdcSolAmount.toFixed(6)} USDC)`,
+    `BTC on-chain: ${paymentBtcAddress() ?? 'not configured'}${
       p.btcAmount ? ` (amount: ${p.btcAmount.toFixed(8)} BTC)` : ''
     }`,
     `Expires: ${new Date(p.expiresAt).toISOString()}`,

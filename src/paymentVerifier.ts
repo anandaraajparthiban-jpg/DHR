@@ -68,6 +68,26 @@ function envTrimmed(name: string): string | undefined {
   return value.length > 0 ? value : undefined;
 }
 
+function envFirst(names: readonly string[]): string | undefined {
+  for (const n of names) {
+    const v = envTrimmed(n);
+    if (v) return v;
+  }
+  return undefined;
+}
+
+function paymentUsdcBaseAddress(): string | undefined {
+  return envFirst(['PAYMENT_USDC_BASE', 'PAYMENT_USDC_BASE_ADDRESS', 'USDC_BASE_ADDRESS']);
+}
+
+function paymentUsdcSolAddress(): string | undefined {
+  return envFirst(['PAYMENT_USDC_SOL', 'PAYMENT_USDC_SOL_ADDRESS', 'USDC_SOL_ADDRESS']);
+}
+
+function paymentBtcAddress(): string | undefined {
+  return envFirst(['PAYMENT_BTC_ONCHAIN', 'PAYMENT_BTC_ADDRESS', 'BTC_ONCHAIN_ADDRESS']);
+}
+
 async function fetchAddressTxs(address: string): Promise<any[]> {
   const res = await fetch(`https://mempool.space/api/address/${address}/txs`);
   if (!res.ok) throw new Error(`mempool tx fetch http ${res.status}`);
@@ -572,7 +592,7 @@ export async function runPaymentVerificationTick(): Promise<VerifySummary> {
   if (intents.length === 0) return { checked: 0, confirmed: 0, expired, confirmedOrderIds: [] };
 
   let btcTxs: any[] = [];
-  const btcAddress = envTrimmed('PAYMENT_BTC_ONCHAIN');
+  const btcAddress = paymentBtcAddress();
   if (btcAddress && shouldTryBtcScan(intents)) {
     try {
       btcTxs = await fetchAddressTxs(btcAddress);
@@ -582,7 +602,7 @@ export async function runPaymentVerificationTick(): Promise<VerifySummary> {
   }
 
   let usdcBaseTransfers: UsdcBaseTransfer[] = [];
-  const usdcBaseAddress = envTrimmed('PAYMENT_USDC_BASE');
+  const usdcBaseAddress = paymentUsdcBaseAddress();
   if (usdcBaseAddress && shouldTryUsdcBase(intents)) {
     try {
       usdcBaseTransfers = await fetchBaseUsdcTransfers(usdcBaseAddress);
@@ -592,7 +612,7 @@ export async function runPaymentVerificationTick(): Promise<VerifySummary> {
   }
 
   let usdcSolTransfers: UsdcSolTransfer[] = [];
-  const usdcSolAddress = envTrimmed('PAYMENT_USDC_SOL');
+  const usdcSolAddress = paymentUsdcSolAddress();
   if (usdcSolAddress && shouldTryUsdcSol(intents)) {
     try {
       usdcSolTransfers = await fetchSolUsdcTransfers(usdcSolAddress);
@@ -666,7 +686,7 @@ export async function runPaymentVerificationDebug(opts?: { maxIntents?: number }
   const intents = intentsRaw.slice(0, maxIntents);
 
   let btcTxs: any[] = [];
-  const btcAddress = envTrimmed('PAYMENT_BTC_ONCHAIN');
+  const btcAddress = paymentBtcAddress();
   if (btcAddress && shouldTryBtcScan(intents)) {
     try {
       btcTxs = await fetchAddressTxs(btcAddress);
@@ -676,7 +696,7 @@ export async function runPaymentVerificationDebug(opts?: { maxIntents?: number }
   }
 
   let usdcBaseTransfers: UsdcBaseTransfer[] = [];
-  const usdcBaseAddress = envTrimmed('PAYMENT_USDC_BASE');
+  const usdcBaseAddress = paymentUsdcBaseAddress();
   if (usdcBaseAddress && shouldTryUsdcBase(intents)) {
     try {
       usdcBaseTransfers = await fetchBaseUsdcTransfers(usdcBaseAddress);
@@ -686,7 +706,7 @@ export async function runPaymentVerificationDebug(opts?: { maxIntents?: number }
   }
 
   let usdcSolTransfers: UsdcSolTransfer[] = [];
-  const usdcSolAddress = envTrimmed('PAYMENT_USDC_SOL');
+  const usdcSolAddress = paymentUsdcSolAddress();
   if (usdcSolAddress && shouldTryUsdcSol(intents)) {
     try {
       usdcSolTransfers = await fetchSolUsdcTransfers(usdcSolAddress);
