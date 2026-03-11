@@ -4,6 +4,7 @@
 // - On payment confirmation, orders can auto-activate; admin can still trigger /mark_paid manually.
 // - Initial release is hardcoded to NiceHash fulfillment.
 import 'dotenv/config';
+import { createHash } from 'node:crypto';
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
 import { quoteHashrate, btcUsd } from './pricing.js';
 import { ensureDbReady, dbBackend } from './db.js';
@@ -37,7 +38,11 @@ if (!token || !appId) {
 
 const adminUserIds = new Set((process.env.ADMIN_USER_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean));
 const orderExpiryTimers = new Map<string, NodeJS.Timeout>();
-const WORKER_NAME_REGEX = /^[A-Za-z0-9]+$/;
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const BASE58_MAP = new Map(BASE58_ALPHABET.split('').map((c, i) => [c, i]));
+const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+const BECH32_MAP = new Map(BECH32_CHARSET.split('').map((c, i) => [c, i]));
+const BECH32M_CONST = 0x2bc830a3;
 
 const commands = [
   new SlashCommandBuilder()
@@ -51,7 +56,7 @@ const commands = [
     .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
     .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true))
     .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL').setRequired(true))
-    .addStringOption((opt) => opt.setName('worker').setDescription('Worker name').setRequired(true)),
+    .addStringOption((opt) => opt.setName('worker').setDescription('BTC address only (no suffix)').setRequired(true)),
   new SlashCommandBuilder()
     .setName('status')
     .setDescription('Check rental status')
@@ -110,14 +115,141 @@ function providerLabel(provider: string | undefined): string {
   return String(provider || 'unknown');
 }
 
+function sha256(data: Uint8Array): Uint8Array {
+  return createHash('sha256').update(data).digest();
+}
+
+function decodeBase58(value: string): Uint8Array | undefined {
+  if (!value) return undefined;
+  const bytes = [0];
+  for (const c of value) {
+    const digit = BASE58_MAP.get(c);
+    if (digit === undefined) return undefined;
+    let carry = digit;
+    for (let i = 0; i < bytes.length; i++) {
+      const x = bytes[i] * 58 + carry;
+      bytes[i] = x & 0xff;
+      carry = x >> 8;
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+  for (let i = 0; i < value.length && value[i] === '1'; i++) {
+    bytes.push(0);
+  }
+  bytes.reverse();
+  return Uint8Array.from(bytes);
+}
+
+function isValidBase58BitcoinAddress(value: string): boolean {
+  if (!/^[13][1-9A-HJ-NP-Za-km-z]{25,34}$/.test(value)) return false;
+  const decoded = decodeBase58(value);
+  if (!decoded || decoded.length !== 25) return false;
+  const payload = decoded.slice(0, 21);
+  const checksum = decoded.slice(21);
+  const expected = sha256(sha256(payload)).slice(0, 4);
+  if (!checksum.every((v, idx) => v === expected[idx])) return false;
+  const version = payload[0];
+  return version === 0x00 || version === 0x05;
+}
+
+function bech32HrpExpand(hrp: string): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < hrp.length; i++) out.push(hrp.charCodeAt(i) >> 5);
+  out.push(0);
+  for (let i = 0; i < hrp.length; i++) out.push(hrp.charCodeAt(i) & 31);
+  return out;
+}
+
+function bech32Polymod(values: number[]): number {
+  const generators = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let chk = 1;
+  for (const v of values) {
+    const top = chk >>> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ v;
+    for (let i = 0; i < generators.length; i++) {
+      if ((top >>> i) & 1) chk ^= generators[i];
+    }
+  }
+  return chk >>> 0;
+}
+
+function convertBits(data: number[], fromBits: number, toBits: number, pad: boolean): number[] | undefined {
+  let acc = 0;
+  let bits = 0;
+  const out: number[] = [];
+  const maxv = (1 << toBits) - 1;
+  const maxAcc = (1 << (fromBits + toBits - 1)) - 1;
+  for (const value of data) {
+    if (value < 0 || value >= (1 << fromBits)) return undefined;
+    acc = ((acc << fromBits) | value) & maxAcc;
+    bits += fromBits;
+    while (bits >= toBits) {
+      bits -= toBits;
+      out.push((acc >> bits) & maxv);
+    }
+  }
+  if (pad) {
+    if (bits > 0) out.push((acc << (toBits - bits)) & maxv);
+  } else if (bits >= fromBits || ((acc << (toBits - bits)) & maxv) !== 0) {
+    return undefined;
+  }
+  return out;
+}
+
+function isValidBech32BitcoinAddress(value: string): boolean {
+  const hasLower = value !== value.toUpperCase();
+  const hasUpper = value !== value.toLowerCase();
+  if (hasLower && hasUpper) return false;
+  const addr = value.toLowerCase();
+  if (!addr.startsWith('bc1')) return false;
+  const sep = addr.lastIndexOf('1');
+  if (sep < 1 || sep + 7 > addr.length) return false;
+  const hrp = addr.slice(0, sep);
+  if (hrp !== 'bc') return false;
+  const dataPart = addr.slice(sep + 1);
+  const values: number[] = [];
+  for (const c of dataPart) {
+    const v = BECH32_MAP.get(c);
+    if (v === undefined) return false;
+    values.push(v);
+  }
+  if (values.length < 7) return false;
+
+  const witnessVersion = values[0];
+  if (witnessVersion < 0 || witnessVersion > 16) return false;
+  const checkConst = bech32Polymod([...bech32HrpExpand(hrp), ...values]);
+  if (witnessVersion === 0 && checkConst !== 1) return false;
+  if (witnessVersion > 0 && checkConst !== BECH32M_CONST) return false;
+
+  const program = convertBits(values.slice(1, -6), 5, 8, false);
+  if (!program) return false;
+  if (program.length < 2 || program.length > 40) return false;
+  if (witnessVersion === 0 && program.length !== 20 && program.length !== 32) return false;
+  return true;
+}
+
 function isValidWorkerName(worker: string): boolean {
-  return worker.length > 0 && WORKER_NAME_REGEX.test(worker);
+  if (worker.length < 14 || worker.length > 90) return false;
+  if (worker.includes('.')) return false;
+  if (worker.includes(':')) return false;
+  if (worker !== worker.trim()) return false;
+  return isValidBase58BitcoinAddress(worker) || isValidBech32BitcoinAddress(worker);
 }
 
 function usdBtcLine(usd: number, btcPrice: number, usdDecimals: number = 2): string {
   const usdPart = `$${usd.toFixed(usdDecimals)}`;
   if (!isFinite(btcPrice) || btcPrice <= 0) return `${usdPart} (BTC price unavailable)`;
   return `${usdPart} (${(usd / btcPrice).toFixed(8)} BTC)`;
+}
+
+function envTrimmed(name: string): string | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const value = raw.trim();
+  return value.length > 0 ? value : undefined;
 }
 
 async function notifyUser(userId: string, message: string) {
@@ -374,7 +506,7 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
 
   if (!isValidWorkerName(worker)) {
     await interaction.reply({
-      content: 'Worker name must contain only letters and numbers (A-Z, a-z, 0-9).',
+      content: 'Worker must be a valid BTC mainnet address only (no suffix like `.worker`, no dots).',
       ephemeral: true,
     });
     return;
@@ -461,9 +593,9 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
     expiresAt: order.expiresAt ?? Date.now() + hours * 3600 * 1000,
   });
 
-  const usdcAddr = process.env.PAYMENT_USDC_BASE;
-  const usdcSolAddr = process.env.PAYMENT_USDC_SOL;
-  const btcAddr = process.env.PAYMENT_BTC_ONCHAIN;
+  const usdcAddr = envTrimmed('PAYMENT_USDC_BASE');
+  const usdcSolAddr = envTrimmed('PAYMENT_USDC_SOL');
+  const btcAddr = envTrimmed('PAYMENT_BTC_ONCHAIN');
   const expiryIso = new Date(payment.expiresAt).toISOString();
 
   const paymentMethods: string[] = [];
@@ -600,9 +732,9 @@ async function handlePaymentStatus(interaction: ChatInputCommandInteraction) {
   const lines = [
     `Order ${id} payment status: ${p.status}`,
     `Reference: ${p.reference}`,
-    `USDC (Base): ${process.env.PAYMENT_USDC_BASE ?? 'not configured'} (amount: ${p.usdcBaseAmount.toFixed(6)} USDC)`,
-    `USDC (Solana): ${process.env.PAYMENT_USDC_SOL ?? 'not configured'} (amount: ${p.usdcSolAmount.toFixed(6)} USDC)`,
-    `BTC on-chain: ${process.env.PAYMENT_BTC_ONCHAIN ?? 'not configured'}${
+    `USDC (Base): ${envTrimmed('PAYMENT_USDC_BASE') ?? 'not configured'} (amount: ${p.usdcBaseAmount.toFixed(6)} USDC)`,
+    `USDC (Solana): ${envTrimmed('PAYMENT_USDC_SOL') ?? 'not configured'} (amount: ${p.usdcSolAmount.toFixed(6)} USDC)`,
+    `BTC on-chain: ${envTrimmed('PAYMENT_BTC_ONCHAIN') ?? 'not configured'}${
       p.btcAmount ? ` (amount: ${p.btcAmount.toFixed(8)} BTC)` : ''
     }`,
     `Expires: ${new Date(p.expiresAt).toISOString()}`,

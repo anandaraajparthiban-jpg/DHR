@@ -108,7 +108,7 @@ Pass criteria:
 
 From Discord:
 1. `/quote ph:1 hours:1`
-2. `/rent ph:1 hours:1 pool:stratum+tcp://... worker:testworker`
+2. `/rent ph:1 hours:1 pool:stratum+tcp://... worker:<btc-mainnet-address>`
 3. `/payment_status id:<order-id>`
 4. `/verify_payments_debug limit:5` (admin)
 
