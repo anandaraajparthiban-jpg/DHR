@@ -13,13 +13,24 @@ export interface NhOrderResult {
   poolId: string;
 }
 
-export async function createNhOrder(opts: {
+export interface NhOrderInput {
   ph: number;
   hours: number;
   poolUrl: string;
   worker: string;
   usdPerPhDay: number;
-}): Promise<NhOrderResult> {
+}
+
+async function resolveNhOrderDraft(opts: NhOrderInput): Promise<{
+  host: string;
+  port: number;
+  market: string;
+  price: number;
+  limit: number;
+  amount: number;
+  buyInfo: Awaited<ReturnType<typeof getNhBuyInfo>>;
+  best: Awaited<ReturnType<typeof getNhBestMarketPrice>>;
+}> {
   const { ph, hours, poolUrl, worker, usdPerPhDay } = opts;
 
   const parsed = new URL(poolUrl.replace('stratum+tcp://', 'http://').replace('stratum+ssl://', 'https://'));
@@ -42,6 +53,17 @@ export async function createNhOrder(opts: {
   const priceFloorMult = Math.max(1, Number(process.env.NICEHASH_ORDERBOOK_PREMIUM_MULT ?? '1.005'));
   const priceFromBook = Number((best.btcPerEhDay * priceFloorMult).toFixed(4));
   const finalPrice = Math.max(price, priceFromBook);
+
+  return { host, port, market, price: finalPrice, limit, amount, buyInfo, best };
+}
+
+export async function ensureNhOrderSatisfiesMinimum(opts: NhOrderInput): Promise<void> {
+  await resolveNhOrderDraft(opts);
+}
+
+export async function createNhOrder(opts: NhOrderInput): Promise<NhOrderResult> {
+  const { worker } = opts;
+  const { host, port, market, price: finalPrice, limit, amount, buyInfo, best } = await resolveNhOrderDraft(opts);
 
   const marketInfo = buyInfo.markets.find((m) => m.market === market || m.market.toUpperCase().startsWith(market.toUpperCase()));
 

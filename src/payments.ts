@@ -175,9 +175,13 @@ export async function confirmPaymentIntent(input: {
     }
 
     const changes = await tx.run(
-      "UPDATE payment_intents SET status = 'confirmed', \"confirmedMethod\" = ?, \"confirmedTxId\" = ?, \"confirmedAt\" = ? WHERE id = ? AND status = 'pending'",
+      "UPDATE payment_intents SET status = 'confirmed', \"confirmedMethod\" = ?, \"confirmedTxId\" = ?, \"confirmedAt\" = ?, notes = NULL WHERE id = ? AND status = 'pending'",
       [input.method, input.txId ?? null, input.confirmedAt ?? Date.now(), input.intentId]
     );
     return changes > 0;
   });
+}
+
+export async function setPaymentIntentNotes(intentId: string, notes?: string | null): Promise<void> {
+  await dbRun('UPDATE payment_intents SET notes = ? WHERE id = ? AND status = ?', [notes ?? null, intentId, 'pending']);
 }

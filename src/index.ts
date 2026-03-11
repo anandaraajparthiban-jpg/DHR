@@ -21,7 +21,7 @@ import {
 } from './orders.js';
 import { validatePool } from './pools.js';
 import { nicehashBalanceUsd } from './balances.js';
-import { createNhOrder, cancelNhOrder } from './nhOrder.js';
+import { createNhOrder, cancelNhOrder, ensureNhOrderSatisfiesMinimum } from './nhOrder.js';
 import { ensurePaymentIntent, getPaymentIntentByOrder } from './payments.js';
 import { runPaymentVerificationTick, runPaymentVerificationDebug, startPaymentVerificationLoop } from './paymentVerifier.js';
 import { terminateProxySession } from './bittiesProxy.js';
@@ -37,6 +37,7 @@ if (!token || !appId) {
 
 const adminUserIds = new Set((process.env.ADMIN_USER_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean));
 const orderExpiryTimers = new Map<string, NodeJS.Timeout>();
+const WORKER_NAME_REGEX = /^[A-Za-z0-9]+$/;
 
 const commands = [
   new SlashCommandBuilder()
@@ -107,6 +108,16 @@ function providerLabel(provider: string | undefined): string {
   if (provider === 'proxy') return 'Bitties Proxy';
   if (provider === 'bitties_proxy') return 'Bitties Proxy';
   return String(provider || 'unknown');
+}
+
+function isValidWorkerName(worker: string): boolean {
+  return worker.length > 0 && WORKER_NAME_REGEX.test(worker);
+}
+
+function usdBtcLine(usd: number, btcPrice: number, usdDecimals: number = 2): string {
+  const usdPart = `$${usd.toFixed(usdDecimals)}`;
+  if (!isFinite(btcPrice) || btcPrice <= 0) return `${usdPart} (BTC price unavailable)`;
+  return `${usdPart} (${(usd / btcPrice).toFixed(8)} BTC)`;
 }
 
 async function notifyUser(userId: string, message: string) {
@@ -320,6 +331,7 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
     await interaction.reply({ content: 'NiceHash quote unavailable right now. Please retry shortly.', ephemeral: true });
     return;
   }
+  const btcPrice = await btcUsd().catch(() => NaN);
   const durationFactor = ph * (hours / 24);
   const baseTotal = q.baseUsdPerPhDay * durationFactor;
   const feeTotal = q.feeUsdPerPhDay * durationFactor;
@@ -330,13 +342,22 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
   const nhFeeBps = Number(process.env.NICEHASH_FEE_BPS ?? '200');
   const braiinsFeeBps = Number(process.env.BRAIINS_FEE_BPS ?? '200');
   const feePct = q.source === 'nicehash' ? nhFeeBps / 100 : q.source === 'braiins' ? braiinsFeeBps / 100 : 0;
-  const feeLineBps = `  Platform fee (${feePct.toFixed(2)}%): $${q.feeUsdPerPhDay.toFixed(2)} / PH-day -> $${feeTotal.toFixed(2)}`;
-  const marginLineBps = `  Margin (${(marginBps / 100).toFixed(2)}%): $${q.marginUsdPerPhDay.toFixed(2)} / PH-day -> $${marginTotal.toFixed(2)}`;
-  const bufferLine = `  BETA buffer funding (${(bufferBps / 100).toFixed(2)}%): $${q.bufferUsdPerPhDay.toFixed(2)} / PH-day -> $${bufferTotal.toFixed(2)}`;
+  const feeLineBps = `  Platform fee (${feePct.toFixed(2)}%): ${usdBtcLine(q.feeUsdPerPhDay, btcPrice)} / PH-day -> ${usdBtcLine(
+    feeTotal,
+    btcPrice
+  )}`;
+  const marginLineBps = `  Margin (${(marginBps / 100).toFixed(2)}%): ${usdBtcLine(q.marginUsdPerPhDay, btcPrice)} / PH-day -> ${usdBtcLine(
+    marginTotal,
+    btcPrice
+  )}`;
+  const bufferLine = `  BETA buffer funding (${(bufferBps / 100).toFixed(2)}%): ${usdBtcLine(
+    q.bufferUsdPerPhDay,
+    btcPrice
+  )} / PH-day -> ${usdBtcLine(bufferTotal, btcPrice)}`;
   const lines = [
-    `Quote: ${ph} PH for ${hours}h -> $${q.totalUsd.toFixed(2)} (unit: $${q.usdPerPhDay.toFixed(2)} / PH-day).`,
+    `Quote: ${ph} PH for ${hours}h -> ${usdBtcLine(q.totalUsd, btcPrice)} (unit: ${usdBtcLine(q.usdPerPhDay, btcPrice)} / PH-day).`,
     `Requested provider: ${providerLabel(INITIAL_RELEASE_PROVIDER)}.`,
-    `  Base: $${q.baseUsdPerPhDay.toFixed(2)} / PH-day -> $${baseTotal.toFixed(2)}`,
+    `  Base: ${usdBtcLine(q.baseUsdPerPhDay, btcPrice)} / PH-day -> ${usdBtcLine(baseTotal, btcPrice)}`,
     feeLineBps,
     marginLineBps,
     bufferLine,
@@ -350,6 +371,14 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
   const provider = INITIAL_RELEASE_PROVIDER;
   const pool = interaction.options.getString('pool', true);
   const worker = interaction.options.getString('worker', true);
+
+  if (!isValidWorkerName(worker)) {
+    await interaction.reply({
+      content: 'Worker name must contain only letters and numbers (A-Z, a-z, 0-9).',
+      ephemeral: true,
+    });
+    return;
+  }
 
   const nhBal = await nicehashBalanceUsd();
   const nhGate = (process.env.NICEHASH_GATE_ENABLED ?? 'true').toLowerCase() !== 'false';
@@ -397,6 +426,23 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
     return;
   }
 
+  try {
+    await ensureNhOrderSatisfiesMinimum({
+      ph,
+      hours,
+      poolUrl: pool,
+      worker,
+      usdPerPhDay: q.usdPerPhDay,
+    });
+  } catch (err) {
+    const msg = (err as Error).message || 'Order does not satisfy NiceHash minimum requirements.';
+    await interaction.reply({
+      content: `Order rejected before creation: ${msg}`,
+      ephemeral: true,
+    });
+    return;
+  }
+
   const order = await createOrder({
     ph,
     hours,
@@ -415,17 +461,30 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
     expiresAt: order.expiresAt ?? Date.now() + hours * 3600 * 1000,
   });
 
-  const usdcAddr = process.env.PAYMENT_USDC_BASE || 'set PAYMENT_USDC_BASE';
-  const usdcSolAddr = process.env.PAYMENT_USDC_SOL || 'set PAYMENT_USDC_SOL';
-  const btcAddr = process.env.PAYMENT_BTC_ONCHAIN || 'set PAYMENT_BTC_ONCHAIN';
+  const usdcAddr = process.env.PAYMENT_USDC_BASE;
+  const usdcSolAddr = process.env.PAYMENT_USDC_SOL;
+  const btcAddr = process.env.PAYMENT_BTC_ONCHAIN;
   const expiryIso = new Date(payment.expiresAt).toISOString();
+
+  const paymentMethods: string[] = [];
+  if (usdcAddr) {
+    paymentMethods.push(`USDC (Base): ${usdcAddr} (amount: ${payment.usdcBaseAmount.toFixed(6)} USDC)`);
+  }
+  if (usdcSolAddr) {
+    paymentMethods.push(`USDC (Solana): ${usdcSolAddr} (amount: ${payment.usdcSolAmount.toFixed(6)} USDC)`);
+  }
+  if (btcAddr) {
+    paymentMethods.push(`BTC on-chain: ${btcAddr}` + (payment.btcAmount ? ` (amount: ${payment.btcAmount.toFixed(8)} BTC)` : ''));
+  }
+  if (paymentMethods.length === 0) {
+    paymentMethods.push('No payment address is configured. Contact admin.');
+  }
 
   const lines = [
     `Order ${order.id} accepted. Status: ${order.status}. Provider selected: ${providerLabel(provider)}.`,
     `Payment reference: ${payment.reference} (expires ${expiryIso})`,
-    `USDC (Base): ${usdcAddr} (amount: ${payment.usdcBaseAmount.toFixed(6)} USDC)`,
-    `USDC (Solana): ${usdcSolAddr} (amount: ${payment.usdcSolAmount.toFixed(6)} USDC)`,
-    `BTC on-chain: ${btcAddr}` + (payment.btcAmount ? ` (amount: ${payment.btcAmount.toFixed(8)} BTC)` : ''),
+    ...paymentMethods,
+    'Important: pay the exact amount shown (all decimals). Underpayment keeps the order pending.',
     `Once payment is confirmed, the order will auto-start on ${providerLabel(provider)}.`
   ];
   await interaction.reply({ content: lines.join('\n'), ephemeral: true });
@@ -541,10 +600,14 @@ async function handlePaymentStatus(interaction: ChatInputCommandInteraction) {
   const lines = [
     `Order ${id} payment status: ${p.status}`,
     `Reference: ${p.reference}`,
-    `USDC Base: ${p.usdcBaseAmount.toFixed(6)}`,
-    `USDC Solana: ${p.usdcSolAmount.toFixed(6)}`,
-    `BTC: ${p.btcAmount ? p.btcAmount.toFixed(8) : 'n/a'}`,
+    `USDC (Base): ${process.env.PAYMENT_USDC_BASE ?? 'not configured'} (amount: ${p.usdcBaseAmount.toFixed(6)} USDC)`,
+    `USDC (Solana): ${process.env.PAYMENT_USDC_SOL ?? 'not configured'} (amount: ${p.usdcSolAmount.toFixed(6)} USDC)`,
+    `BTC on-chain: ${process.env.PAYMENT_BTC_ONCHAIN ?? 'not configured'}${
+      p.btcAmount ? ` (amount: ${p.btcAmount.toFixed(8)} BTC)` : ''
+    }`,
     `Expires: ${new Date(p.expiresAt).toISOString()}`,
+    `Confirmed method: ${p.confirmedMethod ?? 'n/a'}`,
+    p.notes ? `Notes: ${p.notes}` : 'Notes: n/a',
     p.confirmedTxId ? `Confirmed tx: ${p.confirmedTxId}` : 'Confirmed tx: n/a',
   ];
   await interaction.reply({ content: lines.join('\n'), ephemeral: true });

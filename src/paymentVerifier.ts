@@ -1,5 +1,11 @@
 import fetch from 'node-fetch';
-import { confirmPaymentIntent, expireStalePaymentIntents, listPendingPaymentIntents, PaymentIntent } from './payments.js';
+import {
+  confirmPaymentIntent,
+  expireStalePaymentIntents,
+  listPendingPaymentIntents,
+  PaymentIntent,
+  setPaymentIntentNotes,
+} from './payments.js';
 import { markOrderPaymentObserved } from './orders.js';
 
 export interface VerifySummary {
@@ -69,6 +75,12 @@ function isHex(value: string): boolean {
 function toUsdcUnits(amount: number): bigint | undefined {
   if (!isFinite(amount) || amount <= 0) return undefined;
   return BigInt(Math.round(amount * 1_000_000));
+}
+
+function usdcUnitsToFixed6(units: bigint): string {
+  const whole = units / 1_000_000n;
+  const frac = units % 1_000_000n;
+  return `${whole.toString()}.${frac.toString().padStart(6, '0')}`;
 }
 
 function topicForEvmAddress(address: string): string {
@@ -260,6 +272,31 @@ function matchBtcPayment(intent: PaymentIntent, txs: any[], address: string, use
   return undefined;
 }
 
+function btcUnderpaymentNote(intent: PaymentIntent, txs: any[], address: string): string | undefined {
+  if (!intent.btcAmount || !isFinite(intent.btcAmount) || intent.btcAmount <= 0) return undefined;
+  const expectedSats = Math.round(intent.btcAmount * 1e8);
+  const acceptUnconfirmed = (process.env.PAYMENT_ACCEPT_UNCONFIRMED ?? 'false').toLowerCase() === 'true';
+  const maxBackSkewMs = Math.max(0, Number(process.env.PAYMENT_MAX_BACK_SKEW_SEC ?? '900')) * 1000;
+  let bestShortfall: number | undefined;
+
+  for (const tx of txs) {
+    const status = tx?.status ?? {};
+    const confirmed = Boolean(status?.confirmed);
+    if (!confirmed && !acceptUnconfirmed) continue;
+    const confirmedAt = Number(status?.block_time || 0) > 0 ? Number(status.block_time) * 1000 : undefined;
+    if (confirmedAt && confirmedAt + maxBackSkewMs < intent.createdAt) continue;
+    const paidSats = satsFromTxToAddress(tx, address);
+    if (paidSats <= 0 || paidSats >= expectedSats) continue;
+    // Only flag likely underpayment attempts (ignore tiny unrelated transfers).
+    if (paidSats * 2 < expectedSats) continue;
+    const shortfall = expectedSats - paidSats;
+    if (bestShortfall === undefined || shortfall < bestShortfall) bestShortfall = shortfall;
+  }
+
+  if (bestShortfall === undefined) return undefined;
+  return `Detected BTC payment below required amount by ${bestShortfall} sats. This payment will not auto-confirm; send the exact required amount or contact admin.`;
+}
+
 function shouldTryBtcScan(intents: PaymentIntent[]): boolean {
   return intents.some((i) => typeof i.btcAmount === 'number' && isFinite(i.btcAmount) && i.btcAmount > 0);
 }
@@ -293,6 +330,27 @@ function matchUsdcBasePayment(
   return undefined;
 }
 
+function usdcBaseUnderpaymentNote(intent: PaymentIntent, transfers: UsdcBaseTransfer[]): string | undefined {
+  const expected = toUsdcUnits(intent.usdcBaseAmount);
+  if (!expected) return undefined;
+  const maxBackSkewMs = Math.max(0, Number(process.env.PAYMENT_MAX_BACK_SKEW_SEC ?? '900')) * 1000;
+  let bestShortfall: bigint | undefined;
+
+  for (const tr of transfers) {
+    if (tr.blockTimeMs && tr.blockTimeMs + maxBackSkewMs < intent.createdAt) continue;
+    if (tr.amountUnits <= 0n || tr.amountUnits >= expected) continue;
+    // Only flag likely underpayment attempts (ignore tiny unrelated transfers).
+    if (tr.amountUnits * 2n < expected) continue;
+    const shortfall = expected - tr.amountUnits;
+    if (bestShortfall === undefined || shortfall < bestShortfall) bestShortfall = shortfall;
+  }
+
+  if (bestShortfall === undefined) return undefined;
+  return `Detected USDC Base payment below required amount by ${usdcUnitsToFixed6(
+    bestShortfall
+  )} USDC. This payment will not auto-confirm; send the exact required amount or contact admin.`;
+}
+
 function matchUsdcSolPayment(
   intent: PaymentIntent,
   transfers: UsdcSolTransfer[],
@@ -312,6 +370,27 @@ function matchUsdcSolPayment(
     return { txId: tr.txId, confirmedAt: tr.blockTimeMs };
   }
   return undefined;
+}
+
+function usdcSolUnderpaymentNote(intent: PaymentIntent, transfers: UsdcSolTransfer[]): string | undefined {
+  const expected = toUsdcUnits(intent.usdcSolAmount);
+  if (!expected) return undefined;
+  const maxBackSkewMs = Math.max(0, Number(process.env.PAYMENT_MAX_BACK_SKEW_SEC ?? '900')) * 1000;
+  let bestShortfall: bigint | undefined;
+
+  for (const tr of transfers) {
+    if (tr.blockTimeMs && tr.blockTimeMs + maxBackSkewMs < intent.createdAt) continue;
+    if (tr.amountUnits <= 0n || tr.amountUnits >= expected) continue;
+    // Only flag likely underpayment attempts (ignore tiny unrelated transfers).
+    if (tr.amountUnits * 2n < expected) continue;
+    const shortfall = expected - tr.amountUnits;
+    if (bestShortfall === undefined || shortfall < bestShortfall) bestShortfall = shortfall;
+  }
+
+  if (bestShortfall === undefined) return undefined;
+  return `Detected USDC Solana payment below required amount by ${usdcUnitsToFixed6(
+    bestShortfall
+  )} USDC. This payment will not auto-confirm; send the exact required amount or contact admin.`;
 }
 
 function checkBtcIntent(
@@ -482,7 +561,23 @@ export async function runPaymentVerificationTick(): Promise<VerifySummary> {
       const solMatch = matchUsdcSolPayment(intent, usdcSolTransfers, usedTxIds);
       if (solMatch) matched = { method: 'usdc_solana', txId: solMatch.txId, confirmedAt: solMatch.confirmedAt };
     }
-    if (!matched) continue;
+    if (!matched) {
+      const notes: string[] = [];
+      if (btcAddress && btcTxs.length > 0) {
+        const note = btcUnderpaymentNote(intent, btcTxs, btcAddress);
+        if (note) notes.push(note);
+      }
+      if (usdcBaseTransfers.length > 0) {
+        const note = usdcBaseUnderpaymentNote(intent, usdcBaseTransfers);
+        if (note) notes.push(note);
+      }
+      if (usdcSolTransfers.length > 0) {
+        const note = usdcSolUnderpaymentNote(intent, usdcSolTransfers);
+        if (note) notes.push(note);
+      }
+      await setPaymentIntentNotes(intent.id, notes.length > 0 ? notes.join(' | ') : null);
+      continue;
+    }
 
     const updated = await confirmPaymentIntent({
       intentId: intent.id,

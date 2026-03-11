@@ -65,6 +65,10 @@ export function buildNhOrderParams({
     const dot = s.indexOf('.');
     return dot >= 0 ? Math.max(0, s.length - dot - 1) : 0;
   };
+  const roundUp = (value: number, decimals: number): number => {
+    const scale = 10 ** decimals;
+    return Math.ceil(value * scale) / scale;
+  };
 
   const marketUpper = market.toUpperCase();
   let m = buyInfo.markets.find((x) => x.market.toUpperCase() === marketUpper || x.market.toUpperCase().startsWith(marketUpper));
@@ -81,11 +85,13 @@ export function buildNhOrderParams({
   const minLimit = m?.minLimit && isFinite(m.minLimit) ? m.minLimit : 0.001;
   const priceDecimals = decimalsFromStep(minPrice, 4);
   const amountDecimals = decimalsFromStep(minAmount, 3);
-  const limitDecimals = decimalsFromStep(minLimit, 3);
+  // Keep fractional PH requests (e.g. 1.2 PH = 0.0012 EH) from being rounded down.
+  const requestedLimitDecimals = decimalsFromStep(limitEh, 0);
+  const limitDecimals = Math.min(8, Math.max(decimalsFromStep(minLimit, 3), requestedLimitDecimals, 4));
 
   // NiceHash order payload rejects overly precise decimals (PRICE_DATA_SCALE / etc).
   const roundedPrice = Number(Math.max(priceBtcPerEhDay, minPrice).toFixed(priceDecimals));
-  const roundedLimit = Number(Math.max(limitEh, minLimit).toFixed(limitDecimals));
+  const roundedLimit = roundUp(Math.max(limitEh, minLimit), limitDecimals);
   const roundedAmount = Number(amountBtc.toFixed(amountDecimals));
   if (roundedAmount < minAmount) {
     const minHours = (minAmount / (roundedPrice * roundedLimit)) * 24;
