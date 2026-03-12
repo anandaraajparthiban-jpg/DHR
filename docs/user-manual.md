@@ -29,7 +29,7 @@ Admin access is controlled by `ADMIN_USER_IDS` in `.env`.
 
 2. Create an order:
 ```text
-/rent ph:1 hours:12 pool:stratum+tcp://pool.example.com:3333 worker:myworker
+/rent ph:1 hours:12 pool:stratum+tcp://pool.example.com:3333 worker:1BoatSLRHtKNngkdXEeobR76b53LETtpyT
 ```
 
 3. Pay exactly the shown amount to one of:
@@ -66,11 +66,11 @@ Parameters:
 - `ph` (number, required)
 - `hours` (int, required)
 - `pool` (required): pool URL
-- `worker` (required): worker string
+- `worker` (required): BTC mainnet address only (no suffix like `.worker`)
 
 Example:
 ```text
-/rent ph:1.5 hours:8 pool:stratum+tcp://pool.example.com:3333 worker:user001
+/rent ph:1.5 hours:8 pool:stratum+tcp://pool.example.com:3333 worker:1BoatSLRHtKNngkdXEeobR76b53LETtpyT
 ```
 
 Notes:
@@ -154,7 +154,7 @@ Important:
 - Pay exact displayed amount.
 - Use current (not expired) payment intent.
 - If payment is after intent expiry, create a new order/intent.
-- Solana address must be the configured receiving USDC token account.
+- Solana address can be the configured wallet address or the receiving USDC token account.
 
 ## 8. Provider Notes
 

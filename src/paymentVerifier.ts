@@ -61,6 +61,33 @@ const ERC20_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a116
 const SOL_USDC_MAINNET_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const BASE_USDC_MAINNET_TOKEN = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 
+function envTrimmed(name: string): string | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const value = raw.trim();
+  return value.length > 0 ? value : undefined;
+}
+
+function envFirst(names: readonly string[]): string | undefined {
+  for (const n of names) {
+    const v = envTrimmed(n);
+    if (v) return v;
+  }
+  return undefined;
+}
+
+function paymentUsdcBaseAddress(): string | undefined {
+  return envFirst(['PAYMENT_USDC_BASE', 'PAYMENT_USDC_BASE_ADDRESS', 'USDC_BASE_ADDRESS']);
+}
+
+function paymentUsdcSolAddress(): string | undefined {
+  return envFirst(['PAYMENT_USDC_SOL', 'PAYMENT_USDC_SOL_ADDRESS', 'USDC_SOL_ADDRESS']);
+}
+
+function paymentBtcAddress(): string | undefined {
+  return envFirst(['PAYMENT_BTC_ONCHAIN', 'PAYMENT_BTC_ADDRESS', 'BTC_ONCHAIN_ADDRESS']);
+}
+
 async function fetchAddressTxs(address: string): Promise<any[]> {
   const res = await fetch(`https://mempool.space/api/address/${address}/txs`);
   if (!res.ok) throw new Error(`mempool tx fetch http ${res.status}`);
@@ -102,8 +129,9 @@ async function rpcJson(url: string, method: string, params: any[]): Promise<any>
 }
 
 async function fetchBaseUsdcTransfers(toAddress: string): Promise<UsdcBaseTransfer[]> {
-  const rpcUrl = process.env.BASE_RPC_URL || 'https://mainnet.base.org';
-  const tokenAddress = process.env.USDC_BASE_TOKEN || BASE_USDC_MAINNET_TOKEN;
+  const rpcUrl = envTrimmed('BASE_RPC_URL') || 'https://mainnet.base.org';
+  const tokenAddress = envTrimmed('USDC_BASE_TOKEN') || BASE_USDC_MAINNET_TOKEN;
+  const recipient = toAddress.trim();
   const latestHex = String(await rpcJson(rpcUrl, 'eth_blockNumber', []));
   if (!isHex(latestHex)) throw new Error('invalid eth_blockNumber result');
   const latest = Number(BigInt(latestHex));
@@ -111,7 +139,7 @@ async function fetchBaseUsdcTransfers(toAddress: string): Promise<UsdcBaseTransf
   const from = Math.max(0, latest - scanBlocks);
   const filter = {
     address: tokenAddress,
-    topics: [ERC20_TRANSFER_TOPIC, null, topicForEvmAddress(toAddress)],
+    topics: [ERC20_TRANSFER_TOPIC, null, topicForEvmAddress(recipient)],
     fromBlock: `0x${from.toString(16)}`,
     toBlock: `0x${latest.toString(16)}`,
   };
@@ -166,7 +194,12 @@ function getSolAccountKey(tx: any, accountIndex: number): string {
   return '';
 }
 
-function parseSolTransferDeltaUnits(tx: any, recipientAddress: string, mint: string): bigint {
+function parseSolTransferDeltaUnits(
+  tx: any,
+  recipientAccounts: ReadonlySet<string>,
+  recipientOwners: ReadonlySet<string>,
+  mint: string
+): bigint {
   const pre = Array.isArray(tx?.meta?.preTokenBalances) ? tx.meta.preTokenBalances : [];
   const post = Array.isArray(tx?.meta?.postTokenBalances) ? tx.meta.postTokenBalances : [];
   const entries = new Map<number, { pre: bigint; post: bigint }>();
@@ -176,7 +209,8 @@ function parseSolTransferDeltaUnits(tx: any, recipientAddress: string, mint: str
     if (idx < 0) continue;
     if (String(b?.mint || '') !== mint) continue;
     const key = getSolAccountKey(tx, idx);
-    if (key !== recipientAddress) continue;
+    const owner = String(b?.owner || '');
+    if (!recipientAccounts.has(key) && !recipientOwners.has(owner)) continue;
     const amt = BigInt(String(b?.uiTokenAmount?.amount ?? '0'));
     const e = entries.get(idx) ?? { pre: 0n, post: 0n };
     e.pre = amt;
@@ -187,7 +221,8 @@ function parseSolTransferDeltaUnits(tx: any, recipientAddress: string, mint: str
     if (idx < 0) continue;
     if (String(b?.mint || '') !== mint) continue;
     const key = getSolAccountKey(tx, idx);
-    if (key !== recipientAddress) continue;
+    const owner = String(b?.owner || '');
+    if (!recipientAccounts.has(key) && !recipientOwners.has(owner)) continue;
     const amt = BigInt(String(b?.uiTokenAmount?.amount ?? '0'));
     const e = entries.get(idx) ?? { pre: 0n, post: 0n };
     e.post = amt;
@@ -201,31 +236,82 @@ function parseSolTransferDeltaUnits(tx: any, recipientAddress: string, mint: str
   return delta;
 }
 
+async function resolveSolUsdcRecipientAccounts(
+  recipientAddress: string,
+  rpcUrl: string,
+  mint: string
+): Promise<string[]> {
+  const out = new Set<string>();
+  const configured = recipientAddress.trim();
+  if (!configured) return [];
+  out.add(configured);
+
+  try {
+    const owned =
+      (await rpcJson(rpcUrl, 'getTokenAccountsByOwner', [
+        configured,
+        { mint },
+        { encoding: 'jsonParsed' },
+      ])) ?? {};
+    const value = Array.isArray(owned?.value) ? owned.value : [];
+    for (const item of value) {
+      const pubkey = String(item?.pubkey || '').trim();
+      if (pubkey) out.add(pubkey);
+    }
+  } catch {
+    // If recipientAddress is already a token account, owner lookup may return empty/error; keep configured address path.
+  }
+
+  return Array.from(out);
+}
+
 async function fetchSolUsdcTransfers(recipientAddress: string): Promise<UsdcSolTransfer[]> {
-  const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
-  const mint = process.env.USDC_SOL_MINT || SOL_USDC_MAINNET_MINT;
+  const rpcUrl = envTrimmed('SOLANA_RPC_URL') || 'https://api.mainnet-beta.solana.com';
+  const mint = envTrimmed('USDC_SOL_MINT') || SOL_USDC_MAINNET_MINT;
+  const recipient = recipientAddress.trim();
+  const recipientAccounts = await resolveSolUsdcRecipientAccounts(recipient, rpcUrl, mint);
+  if (recipientAccounts.length === 0) return [];
   const limit = Math.max(20, Number(process.env.PAYMENT_SOL_SCAN_LIMIT ?? '200'));
 
-  const sigs: any[] =
-    (await rpcJson(rpcUrl, 'getSignaturesForAddress', [
-      recipientAddress,
-      {
-        limit,
-      },
-    ])) ?? [];
-  if (!Array.isArray(sigs) || sigs.length === 0) return [];
+  const signatures = new Set<string>();
+  let signatureScanWorked = false;
+  let lastScanError: unknown;
+  for (const account of recipientAccounts) {
+    try {
+      const sigs: any[] =
+        (await rpcJson(rpcUrl, 'getSignaturesForAddress', [
+          account,
+          {
+            limit,
+          },
+        ])) ?? [];
+      signatureScanWorked = true;
+      if (!Array.isArray(sigs) || sigs.length === 0) continue;
+      for (const s of sigs) {
+        const signature = String(s?.signature || '');
+        if (signature) signatures.add(signature);
+      }
+    } catch (err) {
+      lastScanError = err;
+    }
+  }
+
+  if (!signatureScanWorked && lastScanError) {
+    throw lastScanError;
+  }
+  if (signatures.size === 0) return [];
 
   const transfers: UsdcSolTransfer[] = [];
-  for (const s of sigs) {
-    const signature = String(s?.signature || '');
-    if (!signature) continue;
+  const recipientAccountSet = new Set(recipientAccounts);
+  const recipientOwnerSet = new Set<string>([recipient]);
+  for (const signature of signatures) {
     try {
       const tx: any = await rpcJson(rpcUrl, 'getTransaction', [
         signature,
         { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 },
       ]);
       if (!tx || tx?.meta?.err) continue;
-      const delta = parseSolTransferDeltaUnits(tx, recipientAddress, mint);
+      const delta = parseSolTransferDeltaUnits(tx, recipientAccountSet, recipientOwnerSet, mint);
       if (delta <= 0n) continue;
       const blockTimeSec = Number(tx?.blockTime || 0);
       transfers.push({
@@ -506,7 +592,7 @@ export async function runPaymentVerificationTick(): Promise<VerifySummary> {
   if (intents.length === 0) return { checked: 0, confirmed: 0, expired, confirmedOrderIds: [] };
 
   let btcTxs: any[] = [];
-  const btcAddress = process.env.PAYMENT_BTC_ONCHAIN;
+  const btcAddress = paymentBtcAddress();
   if (btcAddress && shouldTryBtcScan(intents)) {
     try {
       btcTxs = await fetchAddressTxs(btcAddress);
@@ -516,7 +602,7 @@ export async function runPaymentVerificationTick(): Promise<VerifySummary> {
   }
 
   let usdcBaseTransfers: UsdcBaseTransfer[] = [];
-  const usdcBaseAddress = process.env.PAYMENT_USDC_BASE;
+  const usdcBaseAddress = paymentUsdcBaseAddress();
   if (usdcBaseAddress && shouldTryUsdcBase(intents)) {
     try {
       usdcBaseTransfers = await fetchBaseUsdcTransfers(usdcBaseAddress);
@@ -526,7 +612,7 @@ export async function runPaymentVerificationTick(): Promise<VerifySummary> {
   }
 
   let usdcSolTransfers: UsdcSolTransfer[] = [];
-  const usdcSolAddress = process.env.PAYMENT_USDC_SOL;
+  const usdcSolAddress = paymentUsdcSolAddress();
   if (usdcSolAddress && shouldTryUsdcSol(intents)) {
     try {
       usdcSolTransfers = await fetchSolUsdcTransfers(usdcSolAddress);
@@ -600,7 +686,7 @@ export async function runPaymentVerificationDebug(opts?: { maxIntents?: number }
   const intents = intentsRaw.slice(0, maxIntents);
 
   let btcTxs: any[] = [];
-  const btcAddress = process.env.PAYMENT_BTC_ONCHAIN;
+  const btcAddress = paymentBtcAddress();
   if (btcAddress && shouldTryBtcScan(intents)) {
     try {
       btcTxs = await fetchAddressTxs(btcAddress);
@@ -610,7 +696,7 @@ export async function runPaymentVerificationDebug(opts?: { maxIntents?: number }
   }
 
   let usdcBaseTransfers: UsdcBaseTransfer[] = [];
-  const usdcBaseAddress = process.env.PAYMENT_USDC_BASE;
+  const usdcBaseAddress = paymentUsdcBaseAddress();
   if (usdcBaseAddress && shouldTryUsdcBase(intents)) {
     try {
       usdcBaseTransfers = await fetchBaseUsdcTransfers(usdcBaseAddress);
@@ -620,7 +706,7 @@ export async function runPaymentVerificationDebug(opts?: { maxIntents?: number }
   }
 
   let usdcSolTransfers: UsdcSolTransfer[] = [];
-  const usdcSolAddress = process.env.PAYMENT_USDC_SOL;
+  const usdcSolAddress = paymentUsdcSolAddress();
   if (usdcSolAddress && shouldTryUsdcSol(intents)) {
     try {
       usdcSolTransfers = await fetchSolUsdcTransfers(usdcSolAddress);

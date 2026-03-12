@@ -17,13 +17,13 @@
 ## Current blockers / known issues
 - Braiins spot API: current tokens/host return 404 on /spot/settings/orderbook; spot/bid not yet succeeding. Needs working Braiins API base/token with spot access.
 - NiceHash fallback: buy/info sometimes misses USA; fallback now forces a matched market or the first market, but needs testing; NH auth can still hiccup (override exists for gating).
-- USDC verification requires working RPC endpoints and correct receive addresses (for Solana, `PAYMENT_USDC_SOL` should be the receiving USDC token account).
+- USDC verification requires working RPC endpoints and correct receive addresses (for Solana, `PAYMENT_USDC_SOL` can be either the wallet address or the receiving USDC token account).
 - Bitties Proxy should be smoke-tested against your live deployment (`/auth/login`, `POST /pools`, `DELETE /pools/{id}`) before production rollout.
 - MiningRigRentals integration: not yet integrated; consider adding as provider/fallback.
 
 ## Commands (current)
 - `/quote ph:<number> hours:<int>` — price with breakdown (NiceHash source).
-- `/rent ph:<number> hours:<int> pool:<stratum url> worker:<name>` — place order (NiceHash fulfillment).
+- `/rent ph:<number> hours:<int> pool:<stratum url> worker:<btc-address>` — place order (NiceHash fulfillment).
 - `/status id:<order-id>` — check status (DB-backed).
 - `/cancel id:<order-id>` — cancel if not active.
 - `/payment_status id:<order-id>` — see payment intent status + expected amounts/reference.
