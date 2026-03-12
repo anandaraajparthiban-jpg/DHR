@@ -1,12 +1,12 @@
 // index.ts — Discord bot main:
-// - Registers slash commands (/quote, /rent, /status, /cancel, /payment_status, /mark_paid, /verify_payments, /verify_payments_debug).
+// - Registers slash commands (/quote, /rent, /status, /time_left, /cancel, /payment_status, /mark_paid, /verify_payments, /verify_payments_debug, /finance_summary).
 // - /rent collects pool + worker, creates payment intent, and waits for payment.
 // - On payment confirmation, orders can auto-activate; admin can still trigger /mark_paid manually.
 // - Initial release is hardcoded to NiceHash fulfillment.
 import 'dotenv/config';
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
 import { quoteHashrate, btcUsd } from './pricing.js';
-import { ensureDbReady, dbBackend } from './db.js';
+import { ensureDbReady, dbBackend, dbGet } from './db.js';
 import {
   createOrder,
   cancelOrder,
@@ -44,17 +44,21 @@ const commands = [
     .setName('quote')
     .setDescription('Get a hashrate quote')
     .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
-    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true)),
+    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72)),
   new SlashCommandBuilder()
     .setName('rent')
     .setDescription('Place a hashrate rental')
     .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
-    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true))
+    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72))
     .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL').setRequired(true))
     .addStringOption((opt) => opt.setName('worker').setDescription('Worker name').setRequired(true)),
   new SlashCommandBuilder()
     .setName('status')
     .setDescription('Check rental status')
+    .addStringOption((opt) => opt.setName('id').setDescription('Order ID').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('time_left')
+    .setDescription('Show remaining time for an active rental')
     .addStringOption((opt) => opt.setName('id').setDescription('Order ID').setRequired(true)),
   new SlashCommandBuilder()
     .setName('cancel')
@@ -80,6 +84,7 @@ const commands = [
         .setMinValue(1)
         .setMaxValue(20)
     ),
+  new SlashCommandBuilder().setName('finance_summary').setDescription('Admin: revenue vs NiceHash spend summary'),
 ];
 
 async function registerCommands() {
@@ -127,6 +132,20 @@ async function notifyUser(userId: string, message: string) {
   } catch (err) {
     console.error(`notify user failed for ${userId}`, err);
   }
+}
+
+function formatRemaining(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(totalSec / 86400);
+  const h = Math.floor((totalSec % 86400) / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const parts: string[] = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (h > 0 || d > 0) parts.push(`${h}h`);
+  parts.push(`${m}m`);
+  parts.push(`${s}s`);
+  return parts.join(' ');
 }
 
 function scheduleOrderExpiry(orderId: string, expiresAt: number) {
@@ -266,6 +285,9 @@ client.on('interactionCreate', async (interaction) => {
       case 'status':
         await handleStatus(interaction);
         break;
+      case 'time_left':
+        await handleTimeLeft(interaction);
+        break;
       case 'cancel':
         await handleCancel(interaction);
         break;
@@ -280,6 +302,9 @@ client.on('interactionCreate', async (interaction) => {
         break;
       case 'verify_payments_debug':
         await handleVerifyPaymentsDebug(interaction);
+        break;
+      case 'finance_summary':
+        await handleFinanceSummary(interaction);
         break;
       default:
         await interaction.reply({ content: 'Unknown command', ephemeral: true });
@@ -316,6 +341,10 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
   }
   if (maxHours > 0 && hours > maxHours) {
     await interaction.reply({ content: `Maximum duration is ${maxHours} hours`, ephemeral: true });
+    return;
+  }
+  if (hours > 72) {
+    await interaction.reply({ content: 'Maximum duration is 72 hours', ephemeral: true });
     return;
   }
 
@@ -405,6 +434,10 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
   }
   if (maxHours > 0 && hours > maxHours) {
     await interaction.reply({ content: `Maximum duration is ${maxHours} hours`, ephemeral: true });
+    return;
+  }
+  if (hours > 72) {
+    await interaction.reply({ content: 'Maximum duration is 72 hours', ephemeral: true });
     return;
   }
 
@@ -564,6 +597,38 @@ async function handleStatus(interaction: ChatInputCommandInteraction) {
   await interaction.reply({ content: status.join('\n'), ephemeral: true });
 }
 
+async function handleTimeLeft(interaction: ChatInputCommandInteraction) {
+  const id = interaction.options.getString('id', true);
+  const o = await getOrder(id);
+  if (!o) {
+    await interaction.reply({ content: 'Not found', ephemeral: true });
+    return;
+  }
+  if (!canAccessOrder(interaction.user.id, o.user)) {
+    await interaction.reply({ content: 'Not authorized', ephemeral: true });
+    return;
+  }
+  if (o.status !== 'active') {
+    await interaction.reply({ content: `Order ${id} is not active (status: ${o.status})`, ephemeral: true });
+    return;
+  }
+  if (!o.expiresAt) {
+    await interaction.reply({ content: `Order ${id} has no expiry timestamp`, ephemeral: true });
+    return;
+  }
+
+  const leftMs = o.expiresAt - Date.now();
+  if (leftMs <= 0) {
+    await interaction.reply({ content: `Order ${id} has ended.`, ephemeral: true });
+    return;
+  }
+
+  await interaction.reply({
+    content: `Order ${id} time left: ${formatRemaining(leftMs)} (ends ${new Date(o.expiresAt).toISOString()})`,
+    ephemeral: true,
+  });
+}
+
 async function handleCancel(interaction: ChatInputCommandInteraction) {
   const id = interaction.options.getString('id', true);
   const o = await getOrder(id);
@@ -655,6 +720,36 @@ async function handleVerifyPaymentsDebug(interaction: ChatInputCommandInteractio
     out = `${out.slice(0, 1850)}\n...truncated`;
   }
   await interaction.reply({ content: out, ephemeral: true });
+}
+
+async function handleFinanceSummary(interaction: ChatInputCommandInteraction) {
+  if (!isAdmin(interaction.user.id)) {
+    await interaction.reply({ content: 'Not authorized', ephemeral: true });
+    return;
+  }
+
+  const revenue = await dbGet<{ totalUsd: number; count: number }>(
+    "SELECT COALESCE(SUM(\"usdAmount\"), 0) AS \"totalUsd\", COUNT(*) AS count FROM payment_intents WHERE status = 'confirmed'"
+  );
+  const spend = await dbGet<{ totalBtc: number; count: number }>(
+    "SELECT COALESCE(SUM(\"nhAmount\"), 0) AS \"totalBtc\", COUNT(*) AS count FROM orders WHERE \"fulfillmentProvider\" = 'nicehash' AND \"nhAmount\" IS NOT NULL"
+  );
+
+  const totalRevenueUsd = Number(revenue?.totalUsd ?? 0);
+  const totalSpendBtc = Number(spend?.totalBtc ?? 0);
+  const btcPrice = await btcUsd().catch(() => NaN);
+  const totalSpendUsd = isFinite(btcPrice) ? totalSpendBtc * btcPrice : NaN;
+  const netUsd = isFinite(totalSpendUsd) ? totalRevenueUsd - totalSpendUsd : NaN;
+
+  const lines = [
+    `Finance summary`,
+    `Confirmed payments: ${Number(revenue?.count ?? 0)} -> $${totalRevenueUsd.toFixed(2)} revenue`,
+    `NiceHash orders: ${Number(spend?.count ?? 0)} -> ${totalSpendBtc.toFixed(8)} BTC spent${
+      isFinite(totalSpendUsd) ? ` (~$${totalSpendUsd.toFixed(2)})` : ' (USD conversion unavailable)'
+    }`,
+    isFinite(netUsd) ? `Net (revenue - spend): $${netUsd.toFixed(2)}` : 'Net (revenue - spend): unavailable',
+  ];
+  await interaction.reply({ content: lines.join('\n'), ephemeral: true });
 }
 
 async function start() {

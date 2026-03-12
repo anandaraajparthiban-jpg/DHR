@@ -83,8 +83,10 @@ export function buildNhOrderParams({
   const minAmount = m?.minAmount && isFinite(m.minAmount) ? m.minAmount : 0.001;
   const minPrice = m?.minPrice && isFinite(m.minPrice) ? m.minPrice : 0.0001;
   const minLimit = m?.minLimit && isFinite(m.minLimit) ? m.minLimit : 0.001;
+  const minStartAmountBtc = Math.max(minAmount, Number(process.env.NICEHASH_MIN_START_AMOUNT_BTC ?? '0.0011'));
   const priceDecimals = decimalsFromStep(minPrice, 4);
-  const amountDecimals = decimalsFromStep(minAmount, 3);
+  // minAmount is a minimum threshold, not necessarily the decimal precision step.
+  const amountDecimals = Math.min(8, Math.max(decimalsFromStep(minAmount, 3), 6));
   // Keep fractional PH requests (e.g. 1.2 PH = 0.0012 EH) from being rounded down.
   const requestedLimitDecimals = decimalsFromStep(limitEh, 0);
   const limitDecimals = Math.min(8, Math.max(decimalsFromStep(minLimit, 3), requestedLimitDecimals, 4));
@@ -92,13 +94,20 @@ export function buildNhOrderParams({
   // NiceHash order payload rejects overly precise decimals (PRICE_DATA_SCALE / etc).
   const roundedPrice = Number(Math.max(priceBtcPerEhDay, minPrice).toFixed(priceDecimals));
   const roundedLimit = roundUp(Math.max(limitEh, minLimit), limitDecimals);
-  const roundedAmount = Number(amountBtc.toFixed(amountDecimals));
+  const roundedAmount = roundUp(amountBtc, amountDecimals);
   if (roundedAmount < minAmount) {
     const minHours = (minAmount / (roundedPrice * roundedLimit)) * 24;
     throw new Error(
       `Requested NiceHash order too small: amount ${roundedAmount.toFixed(amountDecimals)} BTC is below minimum ${minAmount.toFixed(
         amountDecimals
       )} BTC for current market. Increase PH/hours (approx minimum hours at this PH: ${minHours.toFixed(2)}h).`
+    );
+  }
+  if (roundedAmount < minStartAmountBtc) {
+    throw new Error(
+      `Requested NiceHash order amount ${roundedAmount.toFixed(
+        amountDecimals
+      )} BTC is below configured minimum start amount ${minStartAmountBtc.toFixed(8)} BTC.`
     );
   }
 
