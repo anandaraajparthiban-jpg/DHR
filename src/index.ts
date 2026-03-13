@@ -378,7 +378,7 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
     }
   }
 
-  const usdPerPhDay = await latestUsdPerPhDay(o);
+  const usdPerPhDay = await latestBaseUsdPerPhDay(o);
   let expiresAt = Date.now() + o.hours * 3600 * 1000;
   const nh = await createNhOrder({ ph: o.ph, hours: o.hours, poolUrl: o.pool, worker: o.worker, usdPerPhDay });
   await saveNhInfo(orderId, {
@@ -628,7 +628,8 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
       hours,
       poolUrl: pool,
       worker,
-      usdPerPhDay: q.usdPerPhDay,
+      // NiceHash order funding must use the raw base quote only.
+      usdPerPhDay: q.baseUsdPerPhDay,
     });
   } catch (err) {
     const msg = (err as Error).message || 'Order does not satisfy NiceHash minimum requirements.';
@@ -710,7 +711,7 @@ async function handleMarkPaid(interaction: ChatInputCommandInteraction) {
   }
 }
 
-async function latestUsdPerPhDay(
+async function latestBaseUsdPerPhDay(
   o: { ph: number; hours: number; pool: string; worker: string }
 ): Promise<number> {
   try {
@@ -722,7 +723,7 @@ async function latestUsdPerPhDay(
       preferredSource: 'nicehash',
     });
     if (q.source !== 'nicehash') return NaN;
-    return q.usdPerPhDay;
+    return q.baseUsdPerPhDay;
   } catch {
     return NaN;
   }
