@@ -113,6 +113,43 @@ function providerWeightForPh(ph: number): number {
   return Math.min(maxWeight, Math.max(minWeight, w));
 }
 
+function extractProxyPoolId(payload: any): string | number | undefined {
+  const idKeys = ['ID', 'Id', 'id', '_id', 'poolId', 'poolID', 'sessionId', 'uuid'];
+  const nestedKeys = ['data', 'pool', 'item', 'session', 'payload', 'response'];
+  const queue: any[] = [payload];
+  const seen = new Set<any>();
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== 'object' || seen.has(current)) continue;
+    seen.add(current);
+
+    for (const key of idKeys) {
+      const value = current[key];
+      if (value !== undefined && value !== null && String(value).trim() !== '') {
+        return value;
+      }
+    }
+
+    for (const key of nestedKeys) {
+      if (current[key] && typeof current[key] === 'object') {
+        queue.push(current[key]);
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function summarizePayload(payload: any): string {
+  try {
+    const text = JSON.stringify(payload);
+    return text.length > 400 ? `${text.slice(0, 400)}...` : text;
+  } catch {
+    return String(payload);
+  }
+}
+
 function validatePoolUrlForBitties(poolUrl: string): void {
   if (!poolUrl.toLowerCase().startsWith('stratum+tcp://')) {
     throw new Error('Bitties requires pool URL with stratum+tcp:// scheme');
@@ -144,8 +181,10 @@ export async function createProxySession(input: {
   };
 
   const data: any = await apiCall(poolsPath(), 'POST', body);
-  const id = data?.ID ?? data?.id;
-  if (id === undefined || id === null) throw new Error('proxy pool create missing id');
+  const id = extractProxyPoolId(data);
+  if (id === undefined || id === null) {
+    throw new Error(`proxy pool create missing id; response=${summarizePayload(data)}`);
+  }
 
   const expiresAt = Date.now() + input.hours * 3600 * 1000;
   return { id: String(id), expiresAt, raw: data };
