@@ -110,12 +110,32 @@ async function apiCall(path: string, method: string, body?: any): Promise<any> {
   return unwrapProxyPayload(payload);
 }
 
+function parsePositiveNumber(raw: string | undefined): number | undefined {
+  const n = Number(raw);
+  return isFinite(n) && n > 0 ? n : undefined;
+}
+
 function providerWeightForPh(ph: number): number {
-  const weightPerPh = Number(process.env.BITTIES_PROXY_WEIGHT_PER_PH ?? '1');
-  const minWeight = Math.max(1, Number(process.env.BITTIES_PROXY_MIN_WEIGHT ?? '1'));
-  const maxWeight = Math.max(minWeight, Number(process.env.BITTIES_PROXY_MAX_WEIGHT ?? '100000'));
-  const w = Math.round(ph * (isFinite(weightPerPh) && weightPerPh > 0 ? weightPerPh : 1));
-  return Math.min(maxWeight, Math.max(minWeight, w));
+  const minWeight = Math.max(1, Math.round(parsePositiveNumber(process.env.BITTIES_PROXY_MIN_WEIGHT) ?? 1));
+  const maxWeight = Math.max(
+    minWeight,
+    Math.round(parsePositiveNumber(process.env.BITTIES_PROXY_MAX_WEIGHT) ?? 100_000)
+  );
+  const totalHashrateTh = parsePositiveNumber(process.env.BITTIES_PROXY_TOTAL_HASHRATE_TH);
+
+  // Preferred mode: map requested share of total TH to a 0-100 style weight scale.
+  if (totalHashrateTh) {
+    const weightScale = Math.max(1, Math.round(parsePositiveNumber(process.env.BITTIES_PROXY_WEIGHT_SCALE) ?? 100));
+    const requestedTh = Math.max(0, ph) * 1000;
+    const ratio = Math.min(1, requestedTh / totalHashrateTh);
+    const computedWeight = Math.round(ratio * weightScale);
+    return Math.min(maxWeight, Math.max(minWeight, computedWeight));
+  }
+
+  // Backward-compatible fallback.
+  const weightPerPh = parsePositiveNumber(process.env.BITTIES_PROXY_WEIGHT_PER_PH) ?? 1;
+  const legacyWeight = Math.round(Math.max(0, ph) * weightPerPh);
+  return Math.min(maxWeight, Math.max(minWeight, legacyWeight));
 }
 
 function extractProxyPoolId(payload: any): string | number | undefined {

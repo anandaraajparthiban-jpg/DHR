@@ -20,6 +20,7 @@ import {
   updateExpiry,
   completeOrder,
   listActiveExpiringOrders,
+  getAllocatedProxyPh,
 } from './orders.js';
 import { validatePool } from './pools.js';
 import { nicehashBalanceUsd } from './balances.js';
@@ -140,6 +141,27 @@ function baseProviderAmountBtc(baseUsdPerPhDay: number, ph: number, hours: numbe
 function selectFulfillmentProvider(baseUsdPerPhDay: number, ph: number, hours: number, btcPrice: number): FulfillmentProvider {
   const providerAmountBtc = baseProviderAmountBtc(baseUsdPerPhDay, ph, hours, btcPrice);
   return providerAmountBtc < BITTIES_PROXY_THRESHOLD_BTC ? 'bitties_proxy' : DEFAULT_FULFILLMENT_PROVIDER;
+}
+
+function configuredProxyTotalPh(): number | undefined {
+  const totalTh = Number(process.env.BITTIES_PROXY_TOTAL_HASHRATE_TH ?? '');
+  if (!isFinite(totalTh) || totalTh <= 0) return undefined;
+  return totalTh / 1000;
+}
+
+async function ensureProxyCapacityAvailable(requestPh: number, excludeOrderId?: string): Promise<void> {
+  const totalPh = configuredProxyTotalPh();
+  if (!totalPh) return;
+
+  const allocatedPh = await getAllocatedProxyPh(excludeOrderId);
+  if (allocatedPh + requestPh <= totalPh + 1e-9) return;
+
+  const remainingPh = Math.max(0, totalPh - allocatedPh);
+  throw new Error(
+    `Bitties Proxy capacity unavailable: requested ${requestPh.toFixed(3)} PH, available ${remainingPh.toFixed(
+      3
+    )} PH (total ${totalPh.toFixed(3)} PH).`
+  );
 }
 
 async function resolveFulfillmentQuote(input: {
@@ -439,6 +461,7 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
   let expiresAt = Date.now() + o.hours * 3600 * 1000;
   let placed: string;
   if (selectedProvider === 'bitties_proxy') {
+    await ensureProxyCapacityAvailable(o.ph, orderId);
     const proxy = await createProxySession({
       orderId,
       userId: o.user,
@@ -695,6 +718,14 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
   if (provider === 'bitties_proxy' && !pool.toLowerCase().startsWith('stratum+tcp://')) {
     await interaction.reply({ content: 'Bitties Proxy requires a pool URL with stratum+tcp:// scheme.', ephemeral: true });
     return;
+  }
+  if (provider === 'bitties_proxy') {
+    try {
+      await ensureProxyCapacityAvailable(ph);
+    } catch (err) {
+      await interaction.reply({ content: (err as Error).message, ephemeral: true });
+      return;
+    }
   }
   if (provider === 'nicehash') {
     const nhBal = await nicehashBalanceUsd();

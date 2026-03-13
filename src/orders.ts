@@ -152,6 +152,24 @@ export async function listActiveExpiringOrders(): Promise<Order[]> {
   return dbAll<Order>('SELECT * FROM orders WHERE status = ? AND "expiresAt" IS NOT NULL', ['active']);
 }
 
+export async function getAllocatedProxyPh(excludeOrderId?: string): Promise<number> {
+  const params: unknown[] = ['fulfilling', 'active', 'proxy', 'bitties_proxy', 'proxy', 'bitties_proxy'];
+  let sql =
+    'SELECT ph FROM orders WHERE status IN (?, ?) AND ("requestedProvider" IN (?, ?) OR "fulfillmentProvider" IN (?, ?))';
+  if (excludeOrderId) {
+    sql += ' AND id <> ?';
+    params.push(excludeOrderId);
+  }
+
+  const rows = await dbAll<{ ph: number }>(sql, params);
+  let total = 0;
+  for (const row of rows) {
+    const n = Number(row?.ph);
+    if (isFinite(n) && n > 0) total += n;
+  }
+  return total;
+}
+
 export async function beginFulfillment(id: string): Promise<'ok' | 'not_found' | 'already_processing' | 'not_awaiting_payment'> {
   const changes = await dbRun(
     "UPDATE orders SET status = 'fulfilling' WHERE id = ? AND (status = 'payment_required' OR status = 'pending')",
