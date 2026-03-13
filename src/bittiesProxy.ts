@@ -67,9 +67,13 @@ async function loginForToken(): Promise<{ token: string; expiresAt?: number }> {
   return { token: String(token), expiresAt };
 }
 
-async function getBearerToken(): Promise<string> {
+async function getBearerToken(): Promise<string | undefined> {
   const staticToken = process.env.BITTIES_PROXY_TOKEN;
   if (staticToken) return staticToken;
+
+  const username = process.env.BITTIES_PROXY_USERNAME;
+  const password = process.env.BITTIES_PROXY_PASSWORD;
+  if (!username || !password) return undefined;
 
   const now = Date.now();
   if (cachedToken?.token && (!cachedToken.expiresAt || cachedToken.expiresAt - now > 60_000)) {
@@ -82,12 +86,15 @@ async function getBearerToken(): Promise<string> {
 
 async function apiCall(path: string, method: string, body?: any): Promise<any> {
   const token = await getBearerToken();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   const res = await fetch(`${buildBaseUrl()}${path}`, {
     method,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -115,9 +122,7 @@ function validatePoolUrlForBitties(poolUrl: string): void {
 export function proxyEnabled(): boolean {
   const enabledFlag = (process.env.BITTIES_PROXY_ENABLED ?? 'true').toLowerCase() !== 'false';
   if (!enabledFlag) return false;
-  if (!process.env.BITTIES_PROXY_BASE) return false;
-  if (process.env.BITTIES_PROXY_TOKEN) return true;
-  return Boolean(process.env.BITTIES_PROXY_USERNAME && process.env.BITTIES_PROXY_PASSWORD);
+  return Boolean(process.env.BITTIES_PROXY_BASE);
 }
 
 export async function createProxySession(input: {
