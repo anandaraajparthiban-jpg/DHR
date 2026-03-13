@@ -42,6 +42,11 @@ function toEpochMs(v: any): number | undefined {
   return undefined;
 }
 
+function unwrapProxyPayload(payload: any): any {
+  if (!payload || typeof payload !== 'object') return payload;
+  return payload.result ?? payload.Result ?? payload.data ?? payload.Data ?? payload;
+}
+
 async function loginForToken(): Promise<{ token: string; expiresAt?: number }> {
   const username = process.env.BITTIES_PROXY_USERNAME;
   const password = process.env.BITTIES_PROXY_PASSWORD;
@@ -60,7 +65,7 @@ async function loginForToken(): Promise<{ token: string; expiresAt?: number }> {
   }
 
   const data: any = await res.json();
-  const result = data?.result ?? data;
+  const result = unwrapProxyPayload(data);
   const token = result?.token;
   if (!token) throw new Error('proxy auth missing token');
   const expiresAt = toEpochMs(result?.expires);
@@ -102,7 +107,7 @@ async function apiCall(path: string, method: string, body?: any): Promise<any> {
     throw new Error(`proxy api ${method} ${path} http ${res.status} body=${txt}`);
   }
   const payload: any = await res.json().catch(() => ({}));
-  return payload?.result ?? payload;
+  return unwrapProxyPayload(payload);
 }
 
 function providerWeightForPh(ph: number): number {
