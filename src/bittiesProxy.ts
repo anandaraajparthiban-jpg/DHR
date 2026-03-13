@@ -120,7 +120,6 @@ function providerWeightForPh(ph: number): number {
 
 function extractProxyPoolId(payload: any): string | number | undefined {
   const idKeys = ['ID', 'Id', 'id', '_id', 'poolId', 'poolID', 'sessionId', 'uuid'];
-  const nestedKeys = ['data', 'pool', 'item', 'session', 'payload', 'response'];
   const queue: any[] = [payload];
   const seen = new Set<any>();
 
@@ -136,10 +135,8 @@ function extractProxyPoolId(payload: any): string | number | undefined {
       }
     }
 
-    for (const key of nestedKeys) {
-      if (current[key] && typeof current[key] === 'object') {
-        queue.push(current[key]);
-      }
+    for (const value of Object.values(current)) {
+      if (value && typeof value === 'object') queue.push(value);
     }
   }
 
