@@ -143,14 +143,14 @@ function durationFactor(ph: number, hours: number): number {
   return ph * (hours / 24);
 }
 
-function baseProviderAmountBtc(baseUsdPerPhDay: number, ph: number, hours: number, btcPrice: number): number {
-  if (!isFinite(baseUsdPerPhDay) || baseUsdPerPhDay <= 0) throw new Error('Invalid base provider quote');
+function usdAmountToBtc(totalUsd: number, btcPrice: number): number {
+  if (!isFinite(totalUsd) || totalUsd <= 0) throw new Error('Invalid provider quote amount');
   if (!isFinite(btcPrice) || btcPrice <= 0) throw new Error('BTC price unavailable for provider selection');
-  return (baseUsdPerPhDay * durationFactor(ph, hours)) / btcPrice;
+  return totalUsd / btcPrice;
 }
 
-function selectFulfillmentProvider(baseUsdPerPhDay: number, ph: number, hours: number, btcPrice: number): FulfillmentProvider {
-  const providerAmountBtc = baseProviderAmountBtc(baseUsdPerPhDay, ph, hours, btcPrice);
+function selectFulfillmentProvider(totalUsd: number, btcPrice: number): FulfillmentProvider {
+  const providerAmountBtc = usdAmountToBtc(totalUsd, btcPrice);
   return providerAmountBtc < BITTIES_PROXY_THRESHOLD_BTC ? 'bitties_proxy' : DEFAULT_FULFILLMENT_PROVIDER;
 }
 
@@ -190,21 +190,18 @@ async function resolveFulfillmentQuote(input: {
   if (routingQuote.source !== 'nicehash') {
     throw new Error('NiceHash quote unavailable right now. Please retry shortly.');
   }
+  const proxyQuote = await quoteHashrate({ ...input, preferredSource: 'bitties_proxy' });
+  if (proxyQuote.source !== 'bitties_proxy') {
+    throw new Error('Bitties Proxy quote unavailable right now. Please retry shortly.');
+  }
 
   const btcPrice = await btcUsd().catch(() => NaN);
   if (!isFinite(btcPrice) || btcPrice <= 0) {
     throw new Error('BTC price unavailable; unable to determine fulfillment provider right now.');
   }
 
-  const provider = selectFulfillmentProvider(routingQuote.baseUsdPerPhDay, input.ph, input.hours, btcPrice);
-  const pricedQuote =
-    provider === 'bitties_proxy'
-      ? await quoteHashrate({ ...input, preferredSource: 'bitties_proxy' })
-      : routingQuote;
-
-  if (provider === 'bitties_proxy' && pricedQuote.source !== 'bitties_proxy') {
-    throw new Error('Bitties Proxy quote unavailable right now. Please retry shortly.');
-  }
+  const provider = selectFulfillmentProvider(proxyQuote.totalUsd, btcPrice);
+  const pricedQuote = provider === 'bitties_proxy' ? proxyQuote : routingQuote;
 
   return { btcPrice, provider, routingQuote, pricedQuote };
 }
