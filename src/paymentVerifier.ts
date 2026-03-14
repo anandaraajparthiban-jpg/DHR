@@ -99,6 +99,10 @@ function isHex(value: string): boolean {
   return /^0x[0-9a-f]+$/i.test(value);
 }
 
+function isEvmAddress(value: string): boolean {
+  return /^0x[0-9a-f]{40}$/i.test(value.trim());
+}
+
 function toUsdcUnits(amount: number): bigint | undefined {
   if (!isFinite(amount) || amount <= 0) return undefined;
   return BigInt(Math.round(amount * 1_000_000));
@@ -604,10 +608,14 @@ export async function runPaymentVerificationTick(): Promise<VerifySummary> {
   let usdcBaseTransfers: UsdcBaseTransfer[] = [];
   const usdcBaseAddress = paymentUsdcBaseAddress();
   if (usdcBaseAddress && shouldTryUsdcBase(intents)) {
-    try {
-      usdcBaseTransfers = await fetchBaseUsdcTransfers(usdcBaseAddress);
-    } catch (err) {
-      console.error('payment verifier usdc base scan error', err);
+    if (!isEvmAddress(usdcBaseAddress)) {
+      console.warn(`payment verifier usdc base scan skipped: PAYMENT_USDC_BASE is not a hex EVM address (${usdcBaseAddress})`);
+    } else {
+      try {
+        usdcBaseTransfers = await fetchBaseUsdcTransfers(usdcBaseAddress);
+      } catch (err) {
+        console.error('payment verifier usdc base scan error', err);
+      }
     }
   }
 
@@ -698,10 +706,16 @@ export async function runPaymentVerificationDebug(opts?: { maxIntents?: number }
   let usdcBaseTransfers: UsdcBaseTransfer[] = [];
   const usdcBaseAddress = paymentUsdcBaseAddress();
   if (usdcBaseAddress && shouldTryUsdcBase(intents)) {
-    try {
-      usdcBaseTransfers = await fetchBaseUsdcTransfers(usdcBaseAddress);
-    } catch (err) {
-      console.error('payment verifier debug usdc base scan error', err);
+    if (!isEvmAddress(usdcBaseAddress)) {
+      console.warn(
+        `payment verifier debug usdc base scan skipped: PAYMENT_USDC_BASE is not a hex EVM address (${usdcBaseAddress})`
+      );
+    } else {
+      try {
+        usdcBaseTransfers = await fetchBaseUsdcTransfers(usdcBaseAddress);
+      } catch (err) {
+        console.error('payment verifier debug usdc base scan error', err);
+      }
     }
   }
 

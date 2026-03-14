@@ -124,7 +124,12 @@ export async function cancelNhOrder(orderId: string): Promise<void> {
     await nhPrivateRequest('DELETE', `/main/api/v2/hashpower/order/${encodeURIComponent(orderId)}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('http 404') || msg.toLowerCase().includes('not found')) {
+    if (
+      msg.includes('http 404') ||
+      msg.toLowerCase().includes('not found') ||
+      msg.includes('"code":5058') ||
+      msg.toLowerCase().includes('order already expired')
+    ) {
       return;
     }
     throw err;
