@@ -32,9 +32,14 @@ import { createProxySession, proxyEnabled, terminateProxySession } from './bitti
 type FulfillmentProvider = 'nicehash' | 'bitties_proxy';
 
 const DEFAULT_FULFILLMENT_PROVIDER: FulfillmentProvider = 'nicehash';
+const NICEHASH_MIN_START_AMOUNT_BTC = (() => {
+  const n = Number(process.env.NICEHASH_MIN_START_AMOUNT_BTC ?? '0.0011');
+  return isFinite(n) && n > 0 ? n : 0.0011;
+})();
 const BITTIES_PROXY_THRESHOLD_BTC = (() => {
-  const n = Number(process.env.BITTIES_PROXY_THRESHOLD_BTC ?? '0.0009');
-  return isFinite(n) && n > 0 ? n : 0.0009;
+  const n = Number(process.env.BITTIES_PROXY_THRESHOLD_BTC ?? '');
+  if (!isFinite(n) || n <= 0) return NICEHASH_MIN_START_AMOUNT_BTC;
+  return Math.min(n, NICEHASH_MIN_START_AMOUNT_BTC);
 })();
 
 const token = process.env.DISCORD_TOKEN ?? '';
