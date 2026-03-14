@@ -143,15 +143,32 @@ function durationFactor(ph: number, hours: number): number {
   return ph * (hours / 24);
 }
 
+function baseProviderAmountBtc(baseUsdPerPhDay: number, ph: number, hours: number, btcPrice: number): number {
+  if (!isFinite(baseUsdPerPhDay) || baseUsdPerPhDay <= 0) throw new Error('Invalid base provider quote');
+  if (!isFinite(btcPrice) || btcPrice <= 0) throw new Error('BTC price unavailable for provider selection');
+  return (baseUsdPerPhDay * durationFactor(ph, hours)) / btcPrice;
+}
+
 function usdAmountToBtc(totalUsd: number, btcPrice: number): number {
   if (!isFinite(totalUsd) || totalUsd <= 0) throw new Error('Invalid provider quote amount');
   if (!isFinite(btcPrice) || btcPrice <= 0) throw new Error('BTC price unavailable for provider selection');
   return totalUsd / btcPrice;
 }
 
-function selectFulfillmentProvider(totalUsd: number, btcPrice: number): FulfillmentProvider {
-  const providerAmountBtc = usdAmountToBtc(totalUsd, btcPrice);
-  return providerAmountBtc < BITTIES_PROXY_THRESHOLD_BTC ? 'bitties_proxy' : DEFAULT_FULFILLMENT_PROVIDER;
+function selectFulfillmentProvider(input: {
+  nicehashBaseUsdPerPhDay: number;
+  bittiesTotalUsd: number;
+  ph: number;
+  hours: number;
+  btcPrice: number;
+}): FulfillmentProvider {
+  const nicehashAmountBtc = baseProviderAmountBtc(input.nicehashBaseUsdPerPhDay, input.ph, input.hours, input.btcPrice);
+  if (nicehashAmountBtc < NICEHASH_MIN_START_AMOUNT_BTC) {
+    return 'bitties_proxy';
+  }
+
+  const bittiesAmountBtc = usdAmountToBtc(input.bittiesTotalUsd, input.btcPrice);
+  return bittiesAmountBtc < BITTIES_PROXY_THRESHOLD_BTC ? 'bitties_proxy' : DEFAULT_FULFILLMENT_PROVIDER;
 }
 
 function configuredProxyTotalPh(): number | undefined {
@@ -200,7 +217,13 @@ async function resolveFulfillmentQuote(input: {
     throw new Error('BTC price unavailable; unable to determine fulfillment provider right now.');
   }
 
-  const provider = selectFulfillmentProvider(proxyQuote.totalUsd, btcPrice);
+  const provider = selectFulfillmentProvider({
+    nicehashBaseUsdPerPhDay: routingQuote.baseUsdPerPhDay,
+    bittiesTotalUsd: proxyQuote.totalUsd,
+    ph: input.ph,
+    hours: input.hours,
+    btcPrice,
+  });
   const pricedQuote = provider === 'bitties_proxy' ? proxyQuote : routingQuote;
 
   return { btcPrice, provider, routingQuote, pricedQuote };
