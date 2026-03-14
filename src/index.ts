@@ -33,8 +33,8 @@ type FulfillmentProvider = 'nicehash' | 'bitties_proxy';
 
 const DEFAULT_FULFILLMENT_PROVIDER: FulfillmentProvider = 'nicehash';
 const BITTIES_PROXY_THRESHOLD_BTC = (() => {
-  const n = Number(process.env.BITTIES_PROXY_THRESHOLD_BTC ?? '0.001');
-  return isFinite(n) && n > 0 ? n : 0.001;
+  const n = Number(process.env.BITTIES_PROXY_THRESHOLD_BTC ?? '0.0009');
+  return isFinite(n) && n > 0 ? n : 0.0009;
 })();
 
 const token = process.env.DISCORD_TOKEN ?? '';

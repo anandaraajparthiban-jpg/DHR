@@ -38,7 +38,7 @@ Edit `.env` and set at minimum:
 - Providers you will use:
   - NiceHash: `NICEHASH_API_KEY`, `NICEHASH_API_SECRET`, `NICEHASH_ORG_ID` (optional `NICEHASH_API_BASE`)
   - Braiins: `BRAIINS_OWNER_TOKEN` or `BRAIINS_READONLY_TOKEN`
-  - Bitties Proxy: `BITTIES_PROXY_BASE` + (`BITTIES_PROXY_TOKEN` or `BITTIES_PROXY_USERNAME`/`BITTIES_PROXY_PASSWORD`), plus `BITTIES_PROXY_TOTAL_HASHRATE_TH` (for share-based weight) and optional `BITTIES_PROXY_WEIGHT_SCALE` (default `100`)
+  - Bitties Proxy: `BITTIES_PROXY_BASE` + (`BITTIES_PROXY_TOKEN` or `BITTIES_PROXY_USERNAME`/`BITTIES_PROXY_PASSWORD`), `BITTIES_PROXY_THRESHOLD_BTC` (set `0.0009` for your routing rule), plus `BITTIES_PROXY_TOTAL_HASHRATE_TH` (for share-based weight) and optional `BITTIES_PROXY_WEIGHT_SCALE` (default `100`)
 
 ## 5. Choose database backend
 
