@@ -57,6 +57,12 @@ const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 const BECH32_MAP = new Map(BECH32_CHARSET.split('').map((c, i) => [c, i]));
 const BECH32M_CONST = 0x2bc830a3;
 
+console.log(
+  `Routing config: NiceHash min start ${NICEHASH_MIN_START_AMOUNT_BTC.toFixed(
+    8
+  )} BTC, Bitties threshold ${BITTIES_PROXY_THRESHOLD_BTC.toFixed(8)} BTC`
+);
+
 const commands = [
   new SlashCommandBuilder()
     .setName('quote')
