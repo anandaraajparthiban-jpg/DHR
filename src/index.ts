@@ -41,6 +41,8 @@ const BITTIES_PROXY_THRESHOLD_BTC = (() => {
   if (!isFinite(n) || n <= 0) return NICEHASH_MIN_START_AMOUNT_BTC;
   return Math.min(n, NICEHASH_MIN_START_AMOUNT_BTC);
 })();
+const FINANCE_SUMMARY_START_AT_MS = Date.UTC(2026, 2, 13, 0, 0, 0, 0);
+const FINANCE_SUMMARY_START_LABEL = '2026-03-13';
 
 const token = process.env.DISCORD_TOKEN ?? '';
 const appId = process.env.DISCORD_APP_ID ?? '';
@@ -1031,10 +1033,19 @@ async function handleFinanceSummary(interaction: ChatInputCommandInteraction) {
   }
 
   const revenue = await dbGet<{ totalUsd: number; count: number }>(
-    "SELECT COALESCE(SUM(\"usdAmount\"), 0) AS \"totalUsd\", COUNT(*) AS count FROM payment_intents WHERE status = 'confirmed'"
+    `SELECT COALESCE(SUM("usdAmount"), 0) AS "totalUsd", COUNT(*) AS count
+     FROM payment_intents
+     WHERE status = 'confirmed'
+       AND COALESCE("confirmedAt", "createdAt") >= ?`,
+    [FINANCE_SUMMARY_START_AT_MS]
   );
   const spend = await dbGet<{ totalBtc: number; count: number }>(
-    "SELECT COALESCE(SUM(\"nhAmount\"), 0) AS \"totalBtc\", COUNT(*) AS count FROM orders WHERE \"fulfillmentProvider\" = 'nicehash' AND \"nhAmount\" IS NOT NULL"
+    `SELECT COALESCE(SUM("nhAmount"), 0) AS "totalBtc", COUNT(*) AS count
+     FROM orders
+     WHERE "fulfillmentProvider" = 'nicehash'
+       AND "nhAmount" IS NOT NULL
+       AND "createdAt" >= ?`,
+    [FINANCE_SUMMARY_START_AT_MS]
   );
 
   const totalRevenueUsd = Number(revenue?.totalUsd ?? 0);
@@ -1044,7 +1055,7 @@ async function handleFinanceSummary(interaction: ChatInputCommandInteraction) {
   const netUsd = isFinite(totalSpendUsd) ? totalRevenueUsd - totalSpendUsd : NaN;
 
   const lines = [
-    `Finance summary`,
+    `Finance summary since ${FINANCE_SUMMARY_START_LABEL}`,
     `Confirmed payments: ${Number(revenue?.count ?? 0)} -> $${totalRevenueUsd.toFixed(2)} revenue`,
     `NiceHash orders: ${Number(spend?.count ?? 0)} -> ${totalSpendBtc.toFixed(8)} BTC spent${
       isFinite(totalSpendUsd) ? ` (~$${totalSpendUsd.toFixed(2)})` : ' (USD conversion unavailable)'
