@@ -22,7 +22,7 @@ import {
 } from './orders.js';
 import { validatePool } from './pools.js';
 import { nicehashBalanceUsd } from './balances.js';
-import { createNhOrder, cancelNhOrder, ensureNhOrderSatisfiesMinimum } from './nhOrder.js';
+import { createNhOrder, cancelNhOrder, ensureNhOrderSatisfiesMinimum, ensureNhQuotedOrderSatisfiesMinimum } from './nhOrder.js';
 import { ensurePaymentIntent, getPaymentIntentByOrder } from './payments.js';
 import { runPaymentVerificationTick, runPaymentVerificationDebug, startPaymentVerificationLoop } from './paymentVerifier.js';
 
@@ -542,6 +542,11 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
     q = resolved.pricedQuote;
     provider = resolved.provider;
     btcPrice = resolved.btcPrice;
+    await ensureNhQuotedOrderSatisfiesMinimum({
+      ph,
+      hours,
+      usdPerPhDay: resolved.routingQuote.baseUsdPerPhDay,
+    });
   } catch (err) {
     const msg = (err as Error).message || 'No valid quote available right now.';
     await interaction.reply({ content: msg, ephemeral: true });

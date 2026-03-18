@@ -21,22 +21,17 @@ export interface NhOrderInput {
   usdPerPhDay: number;
 }
 
-async function resolveNhOrderDraft(opts: NhOrderInput): Promise<{
-  host: string;
-  port: number;
+interface NhOrderEconomics {
   market: string;
   price: number;
   limit: number;
   amount: number;
   buyInfo: Awaited<ReturnType<typeof getNhBuyInfo>>;
   best: Awaited<ReturnType<typeof getNhBestMarketPrice>>;
-}> {
-  const { ph, hours, poolUrl, worker, usdPerPhDay } = opts;
+}
 
-  const parsed = new URL(poolUrl.replace('stratum+tcp://', 'http://').replace('stratum+ssl://', 'https://'));
-  const host = parsed.hostname;
-  const port = Number(parsed.port);
-  if (!host || !port) throw new Error('Invalid pool URL');
+async function resolveNhOrderEconomics(opts: Pick<NhOrderInput, 'ph' | 'hours' | 'usdPerPhDay'>): Promise<NhOrderEconomics> {
+  const { ph, hours, usdPerPhDay } = opts;
 
   const buyInfo = await getNhBuyInfo('SHA256ASICBOOST');
   const best = await getNhBestMarketPrice('SHA256ASICBOOST');
@@ -54,11 +49,27 @@ async function resolveNhOrderDraft(opts: NhOrderInput): Promise<{
   const priceFromBook = Number((best.btcPerEhDay * priceFloorMult).toFixed(4));
   const finalPrice = Math.max(price, priceFromBook);
 
-  return { host, port, market, price: finalPrice, limit, amount, buyInfo, best };
+  return { market, price: finalPrice, limit, amount, buyInfo, best };
+}
+
+async function resolveNhOrderDraft(opts: NhOrderInput): Promise<NhOrderEconomics & { host: string; port: number }> {
+  const { poolUrl } = opts;
+
+  const parsed = new URL(poolUrl.replace('stratum+tcp://', 'http://').replace('stratum+ssl://', 'https://'));
+  const host = parsed.hostname;
+  const port = Number(parsed.port);
+  if (!host || !port) throw new Error('Invalid pool URL');
+
+  const economics = await resolveNhOrderEconomics(opts);
+  return { host, port, ...economics };
 }
 
 export async function ensureNhOrderSatisfiesMinimum(opts: NhOrderInput): Promise<void> {
   await resolveNhOrderDraft(opts);
+}
+
+export async function ensureNhQuotedOrderSatisfiesMinimum(opts: Pick<NhOrderInput, 'ph' | 'hours' | 'usdPerPhDay'>): Promise<void> {
+  await resolveNhOrderEconomics(opts);
 }
 
 export async function createNhOrder(opts: NhOrderInput): Promise<NhOrderResult> {
