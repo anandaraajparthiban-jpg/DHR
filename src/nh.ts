@@ -3,6 +3,9 @@
 // - Build NH order params (price BTC/EH/day, limit EH/s, amount BTC) from USD/PH-day quotes.
 import { nhPublicRequest } from './nhHttp.js';
 
+const NICEHASH_MARKET_MIN_AMOUNT_BTC = 0.001;
+const NICEHASH_DEFAULT_START_AMOUNT_BTC = 0.0011;
+
 export interface NhMarketInfo {
   market: string;
   marketFactor: number;
@@ -80,10 +83,16 @@ export function buildNhOrderParams({
   const priceBtcPerEhDay = (usdPerPhDay / btcPrice) * 1000;
   const limitEh = ph / 1000;
   const amountBtc = priceBtcPerEhDay * limitEh * (hours / 24);
-  const minAmount = m?.minAmount && isFinite(m.minAmount) ? m.minAmount : 0.001;
+  const minAmount = m?.minAmount && isFinite(m.minAmount) ? m.minAmount : NICEHASH_MARKET_MIN_AMOUNT_BTC;
   const minPrice = m?.minPrice && isFinite(m.minPrice) ? m.minPrice : 0.0001;
   const minLimit = m?.minLimit && isFinite(m.minLimit) ? m.minLimit : 0.001;
-  const minStartAmountBtc = Math.max(minAmount, Number(process.env.NICEHASH_MIN_START_AMOUNT_BTC ?? '0.0011'));
+  const configuredMinStartAmountBtc = Number(process.env.NICEHASH_MIN_START_AMOUNT_BTC ?? String(NICEHASH_DEFAULT_START_AMOUNT_BTC));
+  const minStartAmountBtc = Math.max(
+    minAmount,
+    isFinite(configuredMinStartAmountBtc) && configuredMinStartAmountBtc > 0
+      ? configuredMinStartAmountBtc
+      : NICEHASH_DEFAULT_START_AMOUNT_BTC
+  );
   const priceDecimals = decimalsFromStep(minPrice, 4);
   // minAmount is a minimum threshold, not necessarily the decimal precision step.
   const amountDecimals = Math.min(8, Math.max(decimalsFromStep(minAmount, 3), 6));

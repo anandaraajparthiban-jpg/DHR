@@ -2,7 +2,7 @@
 // - Registers slash commands (/quote, /rent, /status, /time_left, /cancel, /payment_status, /mark_paid, /verify_payments, /verify_payments_debug, /finance_summary).
 // - /rent collects pool + worker, creates payment intent, and waits for payment.
 // - On payment confirmation, orders can auto-activate; admin can still trigger /mark_paid manually.
-// - Fulfillment is routed between NiceHash and Bitties Proxy based on provider spend.
+// - Fulfillment uses NiceHash only.
 import 'dotenv/config';
 import { createHash } from 'node:crypto';
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
@@ -16,30 +16,22 @@ import {
   rollbackFulfillment,
   getOrder,
   saveNhInfo,
-  saveProxyInfo,
   updateExpiry,
   completeOrder,
   listActiveExpiringOrders,
-  getAllocatedProxyPh,
 } from './orders.js';
 import { validatePool } from './pools.js';
 import { nicehashBalanceUsd } from './balances.js';
 import { createNhOrder, cancelNhOrder, ensureNhOrderSatisfiesMinimum } from './nhOrder.js';
 import { ensurePaymentIntent, getPaymentIntentByOrder } from './payments.js';
 import { runPaymentVerificationTick, runPaymentVerificationDebug, startPaymentVerificationLoop } from './paymentVerifier.js';
-import { createProxySession, proxyEnabled, terminateProxySession } from './bittiesProxy.js';
 
-type FulfillmentProvider = 'nicehash' | 'bitties_proxy';
+type FulfillmentProvider = 'nicehash';
 
 const DEFAULT_FULFILLMENT_PROVIDER: FulfillmentProvider = 'nicehash';
 const NICEHASH_MIN_START_AMOUNT_BTC = (() => {
   const n = Number(process.env.NICEHASH_MIN_START_AMOUNT_BTC ?? '0.0011');
   return isFinite(n) && n > 0 ? n : 0.0011;
-})();
-const BITTIES_PROXY_THRESHOLD_BTC = (() => {
-  const n = Number(process.env.BITTIES_PROXY_THRESHOLD_BTC ?? '');
-  if (!isFinite(n) || n <= 0) return NICEHASH_MIN_START_AMOUNT_BTC;
-  return Math.min(n, NICEHASH_MIN_START_AMOUNT_BTC);
 })();
 const FINANCE_SUMMARY_START_AT_MS = Date.UTC(2026, 2, 13, 0, 0, 0, 0);
 const FINANCE_SUMMARY_START_LABEL = '2026-03-13';
@@ -59,11 +51,7 @@ const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 const BECH32_MAP = new Map(BECH32_CHARSET.split('').map((c, i) => [c, i]));
 const BECH32M_CONST = 0x2bc830a3;
 
-console.log(
-  `Routing config: NiceHash min start ${NICEHASH_MIN_START_AMOUNT_BTC.toFixed(
-    8
-  )} BTC, Bitties threshold ${BITTIES_PROXY_THRESHOLD_BTC.toFixed(8)} BTC`
-);
+console.log(`Routing config: NiceHash only, minimum start ${NICEHASH_MIN_START_AMOUNT_BTC.toFixed(8)} BTC`);
 
 const commands = [
   new SlashCommandBuilder()
@@ -136,62 +124,11 @@ function canAccessOrder(userId: string, orderUserId: string): boolean {
 function providerLabel(provider: string | undefined): string {
   if (provider === 'nicehash') return 'NiceHash';
   if (provider === 'braiins') return 'Braiins';
-  if (provider === 'proxy') return 'Bitties Proxy';
-  if (provider === 'bitties_proxy') return 'Bitties Proxy';
   return String(provider || 'unknown');
 }
 
 function durationFactor(ph: number, hours: number): number {
   return ph * (hours / 24);
-}
-
-function baseProviderAmountBtc(baseUsdPerPhDay: number, ph: number, hours: number, btcPrice: number): number {
-  if (!isFinite(baseUsdPerPhDay) || baseUsdPerPhDay <= 0) throw new Error('Invalid base provider quote');
-  if (!isFinite(btcPrice) || btcPrice <= 0) throw new Error('BTC price unavailable for provider selection');
-  return (baseUsdPerPhDay * durationFactor(ph, hours)) / btcPrice;
-}
-
-function usdAmountToBtc(totalUsd: number, btcPrice: number): number {
-  if (!isFinite(totalUsd) || totalUsd <= 0) throw new Error('Invalid provider quote amount');
-  if (!isFinite(btcPrice) || btcPrice <= 0) throw new Error('BTC price unavailable for provider selection');
-  return totalUsd / btcPrice;
-}
-
-function selectFulfillmentProvider(input: {
-  nicehashBaseUsdPerPhDay: number;
-  bittiesTotalUsd: number;
-  ph: number;
-  hours: number;
-  btcPrice: number;
-}): FulfillmentProvider {
-  const nicehashAmountBtc = baseProviderAmountBtc(input.nicehashBaseUsdPerPhDay, input.ph, input.hours, input.btcPrice);
-  if (nicehashAmountBtc < NICEHASH_MIN_START_AMOUNT_BTC) {
-    return 'bitties_proxy';
-  }
-
-  const bittiesAmountBtc = usdAmountToBtc(input.bittiesTotalUsd, input.btcPrice);
-  return bittiesAmountBtc < BITTIES_PROXY_THRESHOLD_BTC ? 'bitties_proxy' : DEFAULT_FULFILLMENT_PROVIDER;
-}
-
-function configuredProxyTotalPh(): number | undefined {
-  const totalTh = Number(process.env.BITTIES_PROXY_TOTAL_HASHRATE_TH ?? '');
-  if (!isFinite(totalTh) || totalTh <= 0) return undefined;
-  return totalTh / 1000;
-}
-
-async function ensureProxyCapacityAvailable(requestPh: number, excludeOrderId?: string): Promise<void> {
-  const totalPh = configuredProxyTotalPh();
-  if (!totalPh) return;
-
-  const allocatedPh = await getAllocatedProxyPh(excludeOrderId);
-  if (allocatedPh + requestPh <= totalPh + 1e-9) return;
-
-  const remainingPh = Math.max(0, totalPh - allocatedPh);
-  throw new Error(
-    `Bitties Proxy capacity unavailable: requested ${requestPh.toFixed(3)} PH, available ${remainingPh.toFixed(
-      3
-    )} PH (total ${totalPh.toFixed(3)} PH).`
-  );
 }
 
 async function resolveFulfillmentQuote(input: {
@@ -209,26 +146,18 @@ async function resolveFulfillmentQuote(input: {
   if (routingQuote.source !== 'nicehash') {
     throw new Error('NiceHash quote unavailable right now. Please retry shortly.');
   }
-  const proxyQuote = await quoteHashrate({ ...input, preferredSource: 'bitties_proxy' });
-  if (proxyQuote.source !== 'bitties_proxy') {
-    throw new Error('Bitties Proxy quote unavailable right now. Please retry shortly.');
-  }
 
   const btcPrice = await btcUsd().catch(() => NaN);
   if (!isFinite(btcPrice) || btcPrice <= 0) {
-    throw new Error('BTC price unavailable; unable to determine fulfillment provider right now.');
+    throw new Error('BTC price unavailable; unable to price NiceHash orders right now.');
   }
 
-  const provider = selectFulfillmentProvider({
-    nicehashBaseUsdPerPhDay: routingQuote.baseUsdPerPhDay,
-    bittiesTotalUsd: proxyQuote.totalUsd,
-    ph: input.ph,
-    hours: input.hours,
+  return {
     btcPrice,
-  });
-  const pricedQuote = provider === 'bitties_proxy' ? proxyQuote : routingQuote;
-
-  return { btcPrice, provider, routingQuote, pricedQuote };
+    provider: DEFAULT_FULFILLMENT_PROVIDER,
+    routingQuote,
+    pricedQuote: routingQuote,
+  };
 }
 
 function sha256(data: Uint8Array): Uint8Array {
@@ -434,14 +363,7 @@ async function expireOrder(orderId: string) {
   if (!current || current.status !== 'active') return;
 
   let terminated = true;
-  if ((current.fulfillmentProvider === 'proxy' || current.fulfillmentProvider === 'bitties_proxy') && current.proxySessionId) {
-    try {
-      await terminateProxySession(current.proxySessionId);
-    } catch (err) {
-      terminated = false;
-      console.error(`proxy termination failed for ${orderId}/${current.proxySessionId}`, err);
-    }
-  } else if (current.fulfillmentProvider === 'nicehash' && current.nhOrderId) {
+  if (current.fulfillmentProvider === 'nicehash' && current.nhOrderId) {
     try {
       await cancelNhOrder(current.nhOrderId);
     } catch (err) {
@@ -481,8 +403,7 @@ async function restoreOrderExpirySchedules() {
 async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): Promise<string> {
   const o = await getOrder(orderId);
   if (!o) throw new Error('Not found');
-  const selectedProvider: FulfillmentProvider =
-    o.requestedProvider === 'proxy' || o.requestedProvider === 'bitties_proxy' ? 'bitties_proxy' : DEFAULT_FULFILLMENT_PROVIDER;
+  const selectedProvider: FulfillmentProvider = DEFAULT_FULFILLMENT_PROVIDER;
 
   if (requirePaymentConfirmed) {
     const payment = await getPaymentIntentByOrder(orderId);
@@ -492,32 +413,16 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
   }
 
   let expiresAt = Date.now() + o.hours * 3600 * 1000;
-  let placed: string;
-  if (selectedProvider === 'bitties_proxy') {
-    await ensureProxyCapacityAvailable(o.ph, orderId);
-    const proxy = await createProxySession({
-      orderId,
-      userId: o.user,
-      ph: o.ph,
-      hours: o.hours,
-      poolUrl: o.pool,
-      worker: o.worker,
-    });
-    if (proxy.expiresAt) expiresAt = proxy.expiresAt;
-    await saveProxyInfo(orderId, { proxySessionId: proxy.id });
-    placed = `Bitties Proxy pool created: ${proxy.id}.`;
-  } else {
-    const usdPerPhDay = await latestBaseUsdPerPhDay(o);
-    const nh = await createNhOrder({ ph: o.ph, hours: o.hours, poolUrl: o.pool, worker: o.worker, usdPerPhDay });
-    await saveNhInfo(orderId, {
-      nhOrderId: nh.id,
-      nhMarket: nh.market,
-      nhPrice: nh.price,
-      nhLimit: nh.limit,
-      nhAmount: nh.amount,
-    });
-    placed = `NiceHash order placed: ${nh.id} (market ${nh.market}, price ${nh.price.toFixed(8)} BTC/EH/day, limit ${nh.limit.toFixed(6)} EH/s).`;
-  }
+  const usdPerPhDay = await latestBaseUsdPerPhDay(o);
+  const nh = await createNhOrder({ ph: o.ph, hours: o.hours, poolUrl: o.pool, worker: o.worker, usdPerPhDay });
+  await saveNhInfo(orderId, {
+    nhOrderId: nh.id,
+    nhMarket: nh.market,
+    nhPrice: nh.price,
+    nhLimit: nh.limit,
+    nhAmount: nh.amount,
+  });
+  const placed = `NiceHash order placed: ${nh.id} (market ${nh.market}, price ${nh.price.toFixed(8)} BTC/EH/day, limit ${nh.limit.toFixed(6)} EH/s).`;
 
   await updateExpiry(orderId, expiresAt);
   const msg = await markPaid(orderId);
@@ -744,22 +649,6 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
     return;
   }
 
-  if (provider === 'bitties_proxy' && !proxyEnabled()) {
-    await interaction.reply({ content: 'Bitties Proxy is required for this order size but is not configured.', ephemeral: true });
-    return;
-  }
-  if (provider === 'bitties_proxy' && !pool.toLowerCase().startsWith('stratum+tcp://')) {
-    await interaction.reply({ content: 'Bitties Proxy requires a pool URL with stratum+tcp:// scheme.', ephemeral: true });
-    return;
-  }
-  if (provider === 'bitties_proxy') {
-    try {
-      await ensureProxyCapacityAvailable(ph);
-    } catch (err) {
-      await interaction.reply({ content: (err as Error).message, ephemeral: true });
-      return;
-    }
-  }
   if (provider === 'nicehash') {
     const nhBal = await nicehashBalanceUsd();
     const nhGate = (process.env.NICEHASH_GATE_ENABLED ?? 'true').toLowerCase() !== 'false';

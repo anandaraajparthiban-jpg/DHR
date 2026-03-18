@@ -1,6 +1,6 @@
 // pricing.ts — quote logic.
 // Converts market prices to USD/PH-day, applies platform fees, margin, and buffer.
-// Sources: NiceHash orderbook, Braiins orderbook, Bitties Proxy fixed rate, internal capacity (stub).
+// Sources: NiceHash orderbook, Braiins orderbook, internal capacity (stub).
 // Returns a full breakdown: base, fee, margin, buffer, total.
 import fetch from 'node-fetch';
 
@@ -9,7 +9,7 @@ interface QuoteInput {
   hours: number;
   pool: string;
   worker: string;
-  preferredSource?: 'nicehash' | 'braiins' | 'internal' | 'bitties_proxy';
+  preferredSource?: 'nicehash' | 'braiins' | 'internal';
 }
 
 interface QuoteResult {
@@ -27,7 +27,6 @@ const bufferBps = Number(process.env.BETA_BUFFER_BPS ?? '1000'); // default 10%
 const floorUsdPerPhDay = Number(process.env.FLOOR_USD_PER_PH_DAY ?? '0');
 const nhFeeBps = Number(process.env.NICEHASH_FEE_BPS ?? '200'); // default 2%
 const braiinsFeeBps = Number(process.env.BRAIINS_FEE_BPS ?? '200'); // default 2%
-const bittiesProxyUsdPer100ThDay = Number(process.env.BITTIES_PROXY_USD_PER_100TH_DAY ?? '10');
 const staticInternalUsdPerPhDay = Number(process.env.INTERNAL_CAPACITY_USD_PER_PH_DAY ?? '0');
 const disableNicehash = false; // re-enable NiceHash
 
@@ -36,7 +35,6 @@ export async function quoteHashrate(input: QuoteInput): Promise<QuoteResult> {
   const marketQuotes = await Promise.allSettled([
     disableNicehash ? Promise.resolve(skipQuote('nicehash')) : quoteNicehash(input, nhFeeBps),
     quoteBraiinshash(input, braiinsFeeBps),
-    quoteBittiesProxy(input),
     quoteInternal(input),
   ]);
 
@@ -49,9 +47,7 @@ export async function quoteHashrate(input: QuoteInput): Promise<QuoteResult> {
   const candidates = preferred.length > 0 ? preferred : valid;
 
   if (candidates.length === 0) {
-    throw new Error(
-      'No quotes available. Configure NiceHash/Braiins credentials or set INTERNAL_CAPACITY_USD_PER_PH_DAY.'
-    );
+    throw new Error('No quotes available. Configure NiceHash/Braiins credentials or set INTERNAL_CAPACITY_USD_PER_PH_DAY.');
   }
 
   // pick cheapest
@@ -75,20 +71,6 @@ export async function quoteHashrate(input: QuoteInput): Promise<QuoteResult> {
   };
 
   return best;
-}
-
-async function quoteBittiesProxy(input: QuoteInput): Promise<QuoteResult> {
-  const ratePer100ThDay = isFinite(bittiesProxyUsdPer100ThDay) && bittiesProxyUsdPer100ThDay > 0 ? bittiesProxyUsdPer100ThDay : 10;
-  const baseUsdPerPhDay = ratePer100ThDay * 10; // 1 PH = 1000 TH = 10 x 100 TH
-  return {
-    usdPerPhDay: baseUsdPerPhDay,
-    totalUsd: baseUsdPerPhDay * (input.ph * (input.hours / 24)),
-    source: 'bitties_proxy',
-    baseUsdPerPhDay,
-    feeUsdPerPhDay: 0,
-    marginUsdPerPhDay: 0,
-    bufferUsdPerPhDay: 0,
-  };
 }
 
 // Fetch BTC/USD with fallback and optional override.

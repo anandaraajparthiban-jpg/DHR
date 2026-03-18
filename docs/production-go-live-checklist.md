@@ -51,7 +51,6 @@ Manual verify in `.env`:
 - Provider secrets for providers you enable:
   - NiceHash keys
   - Braiins token
-  - Bitties auth/token + base URL
 
 Pass criteria:
 - No required variable is blank for enabled features
@@ -142,7 +141,7 @@ Pass criteria:
 - cancellation at expiry succeeds
 
 ## 8.2 Other providers
-- Braiins/Bitties checks are optional for this release because runtime is hardcoded to NiceHash.
+- Other provider checks are optional for this release because runtime is hardcoded to NiceHash.
 
 ## 9) Safety Controls
 

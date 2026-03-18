@@ -50,7 +50,6 @@ function normalizeRowKeys<T>(row: any): T {
   if ('nhlimit' in row && !('nhLimit' in row)) row.nhLimit = row.nhlimit;
   if ('nhamount' in row && !('nhAmount' in row)) row.nhAmount = row.nhamount;
   if ('fulfillmentprovider' in row && !('fulfillmentProvider' in row)) row.fulfillmentProvider = row.fulfillmentprovider;
-  if ('proxysessionid' in row && !('proxySessionId' in row)) row.proxySessionId = row.proxysessionid;
   if ('txid' in row && !('txId' in row)) row.txId = row.txid;
   if ('intentid' in row && !('intentId' in row)) row.intentId = row.intentid;
 
@@ -180,8 +179,7 @@ const migrations = [
     "nhLimit" DOUBLE PRECISION,
     "nhAmount" DOUBLE PRECISION,
     "expiresAt" BIGINT,
-    "fulfillmentProvider" TEXT,
-    "proxySessionId" TEXT
+    "fulfillmentProvider" TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS payment_intents (
     id TEXT PRIMARY KEY,
@@ -221,7 +219,6 @@ const orderUpgradeCols: Array<[string, string]> = [
   ['expiresAt', 'BIGINT'],
   ['requestedProvider', 'TEXT'],
   ['fulfillmentProvider', 'TEXT'],
-  ['proxySessionId', 'TEXT'],
 ];
 
 async function addColumnIfMissing(executor: DbExecutor, table: string, column: string, type: string): Promise<void> {

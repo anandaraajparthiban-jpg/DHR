@@ -41,8 +41,7 @@ CREATE TABLE orders (
   "nhLimit" DOUBLE PRECISION,
   "nhAmount" DOUBLE PRECISION,
   "expiresAt" BIGINT,
-  "fulfillmentProvider" TEXT,
-  "proxySessionId" TEXT
+  "fulfillmentProvider" TEXT
 );
 
 CREATE TABLE payment_intents (

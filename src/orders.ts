@@ -31,7 +31,6 @@ export interface Order {
   nhAmount?: number;
   expiresAt?: number;
   fulfillmentProvider?: string;
-  proxySessionId?: string;
 }
 
 export async function createOrder(input: OrderInput): Promise<Order> {
@@ -41,8 +40,8 @@ export async function createOrder(input: OrderInput): Promise<Order> {
 
   await dbRun(
     `INSERT INTO orders
-     (id, ph, hours, pool, worker, "requestedProvider", "user", status, "totalUsd", "createdAt", "nhOrderId", "nhMarket", "nhPrice", "nhLimit", "nhAmount", "expiresAt", "fulfillmentProvider", "proxySessionId")
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (id, ph, hours, pool, worker, "requestedProvider", "user", status, "totalUsd", "createdAt", "nhOrderId", "nhMarket", "nhPrice", "nhLimit", "nhAmount", "expiresAt", "fulfillmentProvider")
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.ph,
@@ -60,7 +59,6 @@ export async function createOrder(input: OrderInput): Promise<Order> {
       null,
       null,
       expiresAt,
-      null,
       null,
     ]
   );
@@ -83,7 +81,6 @@ export async function createOrder(input: OrderInput): Promise<Order> {
     nhAmount: undefined,
     expiresAt,
     fulfillmentProvider: undefined,
-    proxySessionId: undefined,
   };
 }
 
@@ -132,42 +129,12 @@ export async function saveNhInfo(
   await dbRun('UPDATE orders SET "fulfillmentProvider" = ? WHERE id = ?', ['nicehash', id]);
 }
 
-export async function saveProxyInfo(id: string, info: { proxySessionId: string }): Promise<void> {
-  await dbRun('UPDATE orders SET "fulfillmentProvider" = ?, "proxySessionId" = ? WHERE id = ?', [
-    'bitties_proxy',
-    info.proxySessionId,
-    id,
-  ]);
-}
-
-export async function saveFulfillmentProvider(id: string, provider: string): Promise<void> {
-  await dbRun('UPDATE orders SET "fulfillmentProvider" = ? WHERE id = ?', [provider, id]);
-}
-
 export async function updateExpiry(id: string, expiresAt: number): Promise<void> {
   await dbRun('UPDATE orders SET "expiresAt" = ? WHERE id = ?', [expiresAt, id]);
 }
 
 export async function listActiveExpiringOrders(): Promise<Order[]> {
   return dbAll<Order>('SELECT * FROM orders WHERE status = ? AND "expiresAt" IS NOT NULL', ['active']);
-}
-
-export async function getAllocatedProxyPh(excludeOrderId?: string): Promise<number> {
-  const params: unknown[] = ['fulfilling', 'active', 'proxy', 'bitties_proxy', 'proxy', 'bitties_proxy'];
-  let sql =
-    'SELECT ph FROM orders WHERE status IN (?, ?) AND ("requestedProvider" IN (?, ?) OR "fulfillmentProvider" IN (?, ?))';
-  if (excludeOrderId) {
-    sql += ' AND id <> ?';
-    params.push(excludeOrderId);
-  }
-
-  const rows = await dbAll<{ ph: number }>(sql, params);
-  let total = 0;
-  for (const row of rows) {
-    const n = Number(row?.ph);
-    if (isFinite(n) && n > 0) total += n;
-  }
-  return total;
 }
 
 export async function beginFulfillment(id: string): Promise<'ok' | 'not_found' | 'already_processing' | 'not_awaiting_payment'> {

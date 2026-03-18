@@ -160,8 +160,9 @@ Important:
 
 ## 8.1 NiceHash
 - Requires valid NiceHash API credentials and sufficient balance.
+- Minimum NiceHash order amount is `0.001 BTC`, with the bot default start threshold set to `0.0011 BTC`.
 
-## 8.2 Braiins / 8.3 Bitties Proxy
+## 8.2 Braiins
 - Not used in initial release runtime path.
 
 ## 9. Common Errors and Fixes
