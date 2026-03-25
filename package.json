@@ -12,6 +12,7 @@
   "dependencies": {
     "@resvg/resvg-js": "^2.6.2",
     "@types/better-sqlite3": "^7.6.13",
+    "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.6.2",
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
@@ -20,9 +21,9 @@
     "pg": "^8.16.3"
   },
   "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.9.0",
     "@types/node-fetch": "^2.6.11",
-    "@types/jsonwebtoken": "^9.0.10",
     "@types/pg": "^8.15.6",
     "eslint": "^9.12.0",
     "eslint-config-prettier": "^9.1.0",

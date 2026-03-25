@@ -4,8 +4,9 @@
 // - On payment confirmation, orders can auto-activate; admin can still trigger /mark_paid manually.
 // - Fulfillment uses NiceHash only.
 import 'dotenv/config';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
+import bcrypt from 'bcryptjs';
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
 import jwt, { JwtPayload } from 'jsonwebtoken';
 import { quoteHashrate, btcUsd } from './pricing.js';
@@ -37,15 +38,19 @@ interface ApiRuntimeConfig {
   basePath: string;
   jwtAlgorithm: SupportedJwtAlgorithm;
   jwtVerifierKey: string;
+  jwtSigningKey: string;
   jwtIssuer: string;
   jwtAudience: string;
+  jwtAccessTtlSec: number;
   jwtClockToleranceSec: number;
   jwtRequireJti: boolean;
   trustProxy: boolean;
   maxBodyBytes: number;
   rateLimitPerMinute: number;
+  loginRateLimitPerMinute: number;
   adminRoles: Set<string>;
   adminScopes: Set<string>;
+  credentials: Map<string, ApiAuthCredential>;
 }
 
 interface ApiAuthContext {
@@ -54,6 +59,14 @@ interface ApiAuthContext {
   roles: Set<string>;
   scopes: Set<string>;
   tokenId?: string;
+}
+
+interface ApiAuthCredential {
+  username: string;
+  subject: string;
+  passwordHash: string;
+  roles: Set<string>;
+  scopes: Set<string>;
 }
 
 class ApiHttpError extends Error {
@@ -79,6 +92,8 @@ const FINANCE_SUMMARY_START_LABEL = '2026-03-13';
 const REST_API_ENABLED = (process.env.REST_API_ENABLED ?? 'false').toLowerCase() === 'true';
 const API_RATE_WINDOW_MS = 60_000;
 const apiRateBuckets = new Map<string, { count: number; windowStartMs: number }>();
+const API_LOGIN_RATE_WINDOW_MS = 60_000;
+const apiLoginRateBuckets = new Map<string, { count: number; windowStartMs: number }>();
 
 const token = process.env.DISCORD_TOKEN ?? '';
 const appId = process.env.DISCORD_APP_ID ?? '';
@@ -393,6 +408,106 @@ function parsePositiveIntegerOrDefault(value: string | undefined, fallback: numb
   return rounded;
 }
 
+function normalizeCredentialUsername(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeBcryptHash(value: string): string {
+  return value.trim();
+}
+
+function parseCredentialFromObject(
+  row: Record<string, unknown>,
+  indexLabel: string,
+  fallbackRoles: Set<string>,
+  fallbackScopes: Set<string>
+): ApiAuthCredential {
+  const usernameRaw = String(row.username ?? '').trim();
+  if (!usernameRaw) {
+    throw new Error(`Credential ${indexLabel}: missing username`);
+  }
+  const passwordHashRaw = normalizeBcryptHash(String(row.passwordHash ?? ''));
+  if (!passwordHashRaw) {
+    throw new Error(`Credential ${indexLabel}: missing passwordHash`);
+  }
+  if (!/^\$2[aby]\$\d{2}\$/.test(passwordHashRaw)) {
+    throw new Error(`Credential ${indexLabel}: passwordHash must be a bcrypt hash`);
+  }
+  const subjectRaw = String(row.subject ?? usernameRaw).trim();
+  if (!subjectRaw) {
+    throw new Error(`Credential ${indexLabel}: missing subject`);
+  }
+
+  const roles = parseClaimSet(row.roles);
+  const scopes = parseClaimSet(row.scopes ?? row.scope);
+  const normalizedRoles = roles.size > 0 ? roles : fallbackRoles;
+  const normalizedScopes = scopes.size > 0 ? scopes : fallbackScopes;
+
+  return {
+    username: usernameRaw,
+    subject: subjectRaw,
+    passwordHash: passwordHashRaw,
+    roles: new Set(normalizedRoles),
+    scopes: new Set(normalizedScopes),
+  };
+}
+
+function loadApiCredentials(fallbackRoles: Set<string>, fallbackScopes: Set<string>): Map<string, ApiAuthCredential> {
+  const out = new Map<string, ApiAuthCredential>();
+  const credentialsJson = envTrimmed('API_AUTH_CREDENTIALS_JSON');
+
+  if (credentialsJson) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(credentialsJson);
+    } catch {
+      throw new Error('API_AUTH_CREDENTIALS_JSON is not valid JSON');
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error('API_AUTH_CREDENTIALS_JSON must be a JSON array');
+    }
+    parsed.forEach((entry, idx) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error(`Credential ${idx}: must be a JSON object`);
+      }
+      const credential = parseCredentialFromObject(entry as Record<string, unknown>, String(idx), fallbackRoles, fallbackScopes);
+      const key = normalizeCredentialUsername(credential.username);
+      if (out.has(key)) throw new Error(`Duplicate API auth username '${credential.username}'`);
+      out.set(key, credential);
+    });
+    if (out.size > 0) return out;
+  }
+
+  const singleUsername = envTrimmed('API_AUTH_USERNAME');
+  const singlePasswordHash = envTrimmed('API_AUTH_PASSWORD_HASH');
+  if (singleUsername || singlePasswordHash) {
+    if (!singleUsername || !singlePasswordHash) {
+      throw new Error('Set both API_AUTH_USERNAME and API_AUTH_PASSWORD_HASH for single-user auth');
+    }
+    const singleSubject = envTrimmed('API_AUTH_SUBJECT') ?? singleUsername;
+    const singleRoles = splitToSet(envTrimmed('API_AUTH_ROLES'), Array.from(fallbackRoles).join(','));
+    const singleScopes = splitToSet(envTrimmed('API_AUTH_SCOPES'), Array.from(fallbackScopes).join(','));
+    const credential = parseCredentialFromObject(
+      {
+        username: singleUsername,
+        passwordHash: singlePasswordHash,
+        subject: singleSubject,
+        roles: Array.from(singleRoles),
+        scopes: Array.from(singleScopes),
+      },
+      'single',
+      singleRoles,
+      singleScopes
+    );
+    out.set(normalizeCredentialUsername(credential.username), credential);
+    return out;
+  }
+
+  throw new Error(
+    'No API auth credentials configured. Set API_AUTH_CREDENTIALS_JSON or API_AUTH_USERNAME/API_AUTH_PASSWORD_HASH.'
+  );
+}
+
 function loadApiRuntimeConfig(): ApiRuntimeConfig | undefined {
   if (!REST_API_ENABLED) return undefined;
 
@@ -410,16 +525,21 @@ function loadApiRuntimeConfig(): ApiRuntimeConfig | undefined {
     throw new Error('API_JWT_SECRET must be at least 32 characters for HS256');
   }
   const jwtVerifierKey = jwtVerifierKeyRaw.includes('\\n') ? jwtVerifierKeyRaw.replace(/\\n/g, '\n') : jwtVerifierKeyRaw;
+  const jwtSigningKeyRaw = jwtAlgorithm === 'HS256' ? jwtVerifierKeyRaw : envRequired('API_JWT_PRIVATE_KEY');
+  const jwtSigningKey = jwtSigningKeyRaw.includes('\\n') ? jwtSigningKeyRaw.replace(/\\n/g, '\n') : jwtSigningKeyRaw;
 
   const jwtIssuer = envRequired('API_JWT_ISSUER');
   const jwtAudience = envRequired('API_JWT_AUDIENCE');
+  const jwtAccessTtlSec = parsePositiveIntegerOrDefault(envTrimmed('API_JWT_ACCESS_TTL_SEC'), 1800, 60, 86_400);
   const jwtClockToleranceSec = parsePositiveIntegerOrDefault(envTrimmed('API_JWT_CLOCK_TOLERANCE_SEC'), 5, 0, 300);
   const jwtRequireJti = (envTrimmed('API_JWT_REQUIRE_JTI') ?? 'true').toLowerCase() !== 'false';
   const trustProxy = (envTrimmed('API_TRUST_PROXY') ?? 'false').toLowerCase() === 'true';
   const maxBodyBytes = parsePositiveIntegerOrDefault(envTrimmed('API_MAX_BODY_BYTES'), 32_768, 1_024, 1_048_576);
   const rateLimitPerMinute = parsePositiveIntegerOrDefault(envTrimmed('API_RATE_LIMIT_PER_MIN'), 120, 1, 10_000);
+  const loginRateLimitPerMinute = parsePositiveIntegerOrDefault(envTrimmed('API_AUTH_LOGIN_RATE_LIMIT_PER_MIN'), 20, 1, 1_000);
   const adminRoles = splitToSet(envTrimmed('API_ADMIN_ROLES'), 'admin');
   const adminScopes = splitToSet(envTrimmed('API_ADMIN_SCOPES'), 'admin');
+  const credentials = loadApiCredentials(adminRoles, adminScopes);
 
   return {
     host,
@@ -427,15 +547,19 @@ function loadApiRuntimeConfig(): ApiRuntimeConfig | undefined {
     basePath,
     jwtAlgorithm,
     jwtVerifierKey,
+    jwtSigningKey,
     jwtIssuer,
     jwtAudience,
+    jwtAccessTtlSec,
     jwtClockToleranceSec,
     jwtRequireJti,
     trustProxy,
     maxBodyBytes,
     rateLimitPerMinute,
+    loginRateLimitPerMinute,
     adminRoles,
     adminScopes,
+    credentials,
   };
 }
 
@@ -556,6 +680,45 @@ function enforceApiRateLimit(auth: ApiAuthContext, ip: string, cfg: ApiRuntimeCo
     throw new ApiHttpError(429, 'rate_limited', 'Rate limit exceeded', { retryAfterSec });
   }
   bucket.count += 1;
+}
+
+function enforceLoginRateLimit(ip: string, cfg: ApiRuntimeConfig): void {
+  const now = Date.now();
+  const bucket = apiLoginRateBuckets.get(ip);
+  if (!bucket || now - bucket.windowStartMs >= API_LOGIN_RATE_WINDOW_MS) {
+    apiLoginRateBuckets.set(ip, { count: 1, windowStartMs: now });
+    return;
+  }
+  if (bucket.count >= cfg.loginRateLimitPerMinute) {
+    const retryAfterSec = Math.max(1, Math.ceil((API_LOGIN_RATE_WINDOW_MS - (now - bucket.windowStartMs)) / 1000));
+    throw new ApiHttpError(429, 'rate_limited', 'Too many login attempts', { retryAfterSec });
+  }
+  bucket.count += 1;
+}
+
+function issueAccessToken(credential: ApiAuthCredential, cfg: ApiRuntimeConfig): { accessToken: string; expiresInSec: number } {
+  const roles = Array.from(credential.roles);
+  const scopes = Array.from(credential.scopes);
+  const payload: Record<string, unknown> = {
+    username: credential.username,
+  };
+  if (roles.length > 0) {
+    payload.roles = roles;
+    payload.role = roles[0];
+  }
+  if (scopes.length > 0) {
+    payload.scopes = scopes;
+    payload.scope = scopes.join(' ');
+  }
+  const accessToken = jwt.sign(payload, cfg.jwtSigningKey, {
+    algorithm: cfg.jwtAlgorithm,
+    subject: credential.subject,
+    issuer: cfg.jwtIssuer,
+    audience: cfg.jwtAudience,
+    expiresIn: cfg.jwtAccessTtlSec,
+    jwtid: randomUUID(),
+  });
+  return { accessToken, expiresInSec: cfg.jwtAccessTtlSec };
 }
 
 async function readJsonBody(req: IncomingMessage, maxBodyBytes: number): Promise<Record<string, unknown>> {
@@ -853,12 +1016,41 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
     sendApiJson(res, 404, { ok: false, error: 'not_found', message: 'Route not found' });
     return;
   }
+  const routePath = pathname.slice(cfg.basePath.length) || '/';
 
   try {
+    if (method === 'POST' && routePath === '/auth/login') {
+      const ip = requestIp(req, cfg);
+      enforceLoginRateLimit(ip, cfg);
+      const body = await readJsonBody(req, cfg.maxBodyBytes);
+      const username = bodyString(body, 'username');
+      const password = bodyString(body, 'password');
+      const credential = cfg.credentials.get(normalizeCredentialUsername(username));
+      if (!credential) {
+        throw new ApiHttpError(401, 'unauthorized', 'Invalid username or password');
+      }
+      const ok = await bcrypt.compare(password, credential.passwordHash);
+      if (!ok) {
+        throw new ApiHttpError(401, 'unauthorized', 'Invalid username or password');
+      }
+      const token = issueAccessToken(credential, cfg);
+      sendApiJson(res, 200, {
+        ok: true,
+        tokenType: 'Bearer',
+        accessToken: token.accessToken,
+        expiresInSec: token.expiresInSec,
+        expiresAt: Date.now() + token.expiresInSec * 1000,
+        subject: credential.subject,
+        username: credential.username,
+        roles: Array.from(credential.roles),
+        scopes: Array.from(credential.scopes),
+      });
+      return;
+    }
+
     const auth = parseApiAuth(req, cfg);
     const ip = requestIp(req, cfg);
     enforceApiRateLimit(auth, ip, cfg);
-    const routePath = pathname.slice(cfg.basePath.length) || '/';
 
     if (method === 'POST' && routePath === '/quote') {
       const body = await readJsonBody(req, cfg.maxBodyBytes);
