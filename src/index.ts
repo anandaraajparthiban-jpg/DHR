@@ -5,7 +5,9 @@
 // - Fulfillment uses NiceHash only.
 import 'dotenv/config';
 import { createHash } from 'node:crypto';
+import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
+import jwt, { JwtPayload } from 'jsonwebtoken';
 import { quoteHashrate, btcUsd } from './pricing.js';
 import { ensureDbReady, dbBackend, dbGet } from './db.js';
 import {
@@ -27,6 +29,45 @@ import { ensurePaymentIntent, getPaymentIntentByOrder } from './payments.js';
 import { runPaymentVerificationTick, runPaymentVerificationDebug, startPaymentVerificationLoop } from './paymentVerifier.js';
 
 type FulfillmentProvider = 'nicehash';
+type SupportedJwtAlgorithm = 'HS256' | 'RS256';
+
+interface ApiRuntimeConfig {
+  host: string;
+  port: number;
+  basePath: string;
+  jwtAlgorithm: SupportedJwtAlgorithm;
+  jwtVerifierKey: string;
+  jwtIssuer: string;
+  jwtAudience: string;
+  jwtClockToleranceSec: number;
+  jwtRequireJti: boolean;
+  trustProxy: boolean;
+  maxBodyBytes: number;
+  rateLimitPerMinute: number;
+  adminRoles: Set<string>;
+  adminScopes: Set<string>;
+}
+
+interface ApiAuthContext {
+  userId: string;
+  isAdmin: boolean;
+  roles: Set<string>;
+  scopes: Set<string>;
+  tokenId?: string;
+}
+
+class ApiHttpError extends Error {
+  statusCode: number;
+  errorCode: string;
+  details?: unknown;
+
+  constructor(statusCode: number, errorCode: string, message: string, details?: unknown) {
+    super(message);
+    this.statusCode = statusCode;
+    this.errorCode = errorCode;
+    this.details = details;
+  }
+}
 
 const DEFAULT_FULFILLMENT_PROVIDER: FulfillmentProvider = 'nicehash';
 const NICEHASH_MIN_START_AMOUNT_BTC = (() => {
@@ -35,6 +76,9 @@ const NICEHASH_MIN_START_AMOUNT_BTC = (() => {
 })();
 const FINANCE_SUMMARY_START_AT_MS = Date.UTC(2026, 2, 13, 0, 0, 0, 0);
 const FINANCE_SUMMARY_START_LABEL = '2026-03-13';
+const REST_API_ENABLED = (process.env.REST_API_ENABLED ?? 'false').toLowerCase() === 'true';
+const API_RATE_WINDOW_MS = 60_000;
+const apiRateBuckets = new Map<string, { count: number; windowStartMs: number }>();
 
 const token = process.env.DISCORD_TOKEN ?? '';
 const appId = process.env.DISCORD_APP_ID ?? '';
@@ -317,6 +361,297 @@ function paymentBtcAddress(): string | undefined {
   return envFirst(['PAYMENT_BTC_ONCHAIN', 'PAYMENT_BTC_ADDRESS', 'BTC_ONCHAIN_ADDRESS']);
 }
 
+function envRequired(name: string): string {
+  const value = envTrimmed(name);
+  if (!value) throw new Error(`Missing required environment variable ${name}`);
+  return value;
+}
+
+function normalizeApiBasePath(input: string): string {
+  const raw = input.trim();
+  const prefixed = raw.startsWith('/') ? raw : `/${raw}`;
+  if (prefixed.length <= 1) return '/api/v1';
+  return prefixed.endsWith('/') ? prefixed.slice(0, -1) : prefixed;
+}
+
+function splitToSet(raw: string | undefined, fallback: string): Set<string> {
+  const source = raw && raw.trim().length > 0 ? raw : fallback;
+  return new Set(
+    source
+      .split(',')
+      .map((v) => v.trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+function parsePositiveIntegerOrDefault(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number(value ?? fallback);
+  if (!isFinite(parsed)) return fallback;
+  const rounded = Math.floor(parsed);
+  if (rounded < min) return min;
+  if (rounded > max) return max;
+  return rounded;
+}
+
+function loadApiRuntimeConfig(): ApiRuntimeConfig | undefined {
+  if (!REST_API_ENABLED) return undefined;
+
+  const host = envTrimmed('REST_API_HOST') ?? '127.0.0.1';
+  const port = parsePositiveIntegerOrDefault(envTrimmed('REST_API_PORT'), 8080, 1, 65535);
+  const basePath = normalizeApiBasePath(envTrimmed('REST_API_BASE_PATH') ?? '/api/v1');
+
+  const algRaw = (envTrimmed('API_JWT_ALGORITHM') ?? 'HS256').toUpperCase();
+  if (algRaw !== 'HS256' && algRaw !== 'RS256') {
+    throw new Error(`Unsupported API_JWT_ALGORITHM '${algRaw}'. Supported: HS256, RS256`);
+  }
+  const jwtAlgorithm = algRaw as SupportedJwtAlgorithm;
+  const jwtVerifierKeyRaw = jwtAlgorithm === 'HS256' ? envRequired('API_JWT_SECRET') : envRequired('API_JWT_PUBLIC_KEY');
+  if (jwtAlgorithm === 'HS256' && jwtVerifierKeyRaw.length < 32) {
+    throw new Error('API_JWT_SECRET must be at least 32 characters for HS256');
+  }
+  const jwtVerifierKey = jwtVerifierKeyRaw.includes('\\n') ? jwtVerifierKeyRaw.replace(/\\n/g, '\n') : jwtVerifierKeyRaw;
+
+  const jwtIssuer = envRequired('API_JWT_ISSUER');
+  const jwtAudience = envRequired('API_JWT_AUDIENCE');
+  const jwtClockToleranceSec = parsePositiveIntegerOrDefault(envTrimmed('API_JWT_CLOCK_TOLERANCE_SEC'), 5, 0, 300);
+  const jwtRequireJti = (envTrimmed('API_JWT_REQUIRE_JTI') ?? 'true').toLowerCase() !== 'false';
+  const trustProxy = (envTrimmed('API_TRUST_PROXY') ?? 'false').toLowerCase() === 'true';
+  const maxBodyBytes = parsePositiveIntegerOrDefault(envTrimmed('API_MAX_BODY_BYTES'), 32_768, 1_024, 1_048_576);
+  const rateLimitPerMinute = parsePositiveIntegerOrDefault(envTrimmed('API_RATE_LIMIT_PER_MIN'), 120, 1, 10_000);
+  const adminRoles = splitToSet(envTrimmed('API_ADMIN_ROLES'), 'admin');
+  const adminScopes = splitToSet(envTrimmed('API_ADMIN_SCOPES'), 'admin');
+
+  return {
+    host,
+    port,
+    basePath,
+    jwtAlgorithm,
+    jwtVerifierKey,
+    jwtIssuer,
+    jwtAudience,
+    jwtClockToleranceSec,
+    jwtRequireJti,
+    trustProxy,
+    maxBodyBytes,
+    rateLimitPerMinute,
+    adminRoles,
+    adminScopes,
+  };
+}
+
+function validateSizeDuration(ph: number, hours: number): string | undefined {
+  const minPh = Number(process.env.MIN_PH ?? '0');
+  const maxPh = Number(process.env.MAX_PH ?? '0');
+  const minHours = Number(process.env.MIN_HOURS ?? '0');
+  const maxHours = Number(process.env.MAX_HOURS ?? '0');
+  if (minPh > 0 && ph < minPh) return `Minimum size is ${minPh} PH`;
+  if (maxPh > 0 && ph > maxPh) return `Maximum size is ${maxPh} PH`;
+  if (minHours > 0 && hours < minHours) return `Minimum duration is ${minHours} hours`;
+  if (maxHours > 0 && hours > maxHours) return `Maximum duration is ${maxHours} hours`;
+  if (hours > 72) return 'Maximum duration is 72 hours';
+  return undefined;
+}
+
+function parseClaimSet(value: unknown): Set<string> {
+  const out = new Set<string>();
+  if (typeof value === 'string') {
+    const parts = value.includes(' ') ? value.split(' ') : value.split(',');
+    for (const part of parts) {
+      const normalized = part.trim().toLowerCase();
+      if (normalized) out.add(normalized);
+    }
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      if (typeof v !== 'string') continue;
+      const normalized = v.trim().toLowerCase();
+      if (normalized) out.add(normalized);
+    }
+  }
+  return out;
+}
+
+function parseApiAuth(req: IncomingMessage, cfg: ApiRuntimeConfig): ApiAuthContext {
+  const authz = req.headers.authorization;
+  if (!authz || typeof authz !== 'string') {
+    throw new ApiHttpError(401, 'unauthorized', 'Missing Authorization header');
+  }
+  const match = authz.match(/^Bearer\s+(.+)$/i);
+  if (!match) {
+    throw new ApiHttpError(401, 'unauthorized', 'Authorization header must be Bearer token');
+  }
+  const token = match[1].trim();
+  if (!token) {
+    throw new ApiHttpError(401, 'unauthorized', 'Bearer token is empty');
+  }
+
+  let verified: string | JwtPayload;
+  try {
+    verified = jwt.verify(token, cfg.jwtVerifierKey, {
+      algorithms: [cfg.jwtAlgorithm],
+      issuer: cfg.jwtIssuer,
+      audience: cfg.jwtAudience,
+      clockTolerance: cfg.jwtClockToleranceSec,
+    });
+  } catch {
+    throw new ApiHttpError(401, 'unauthorized', 'Token verification failed');
+  }
+  if (!verified || typeof verified === 'string') {
+    throw new ApiHttpError(401, 'unauthorized', 'Token payload is invalid');
+  }
+
+  if (typeof verified.sub !== 'string' || verified.sub.trim().length === 0) {
+    throw new ApiHttpError(401, 'unauthorized', 'Token must include a non-empty sub claim');
+  }
+  if (typeof verified.exp !== 'number') {
+    throw new ApiHttpError(401, 'unauthorized', 'Token must include exp claim');
+  }
+  if (cfg.jwtRequireJti && (typeof verified.jti !== 'string' || verified.jti.trim().length === 0)) {
+    throw new ApiHttpError(401, 'unauthorized', 'Token must include jti claim');
+  }
+
+  const roles = new Set<string>([
+    ...parseClaimSet(verified.role),
+    ...parseClaimSet((verified as JwtPayload & { roles?: unknown }).roles),
+  ]);
+  const scopes = new Set<string>([
+    ...parseClaimSet(verified.scope),
+    ...parseClaimSet((verified as JwtPayload & { scopes?: unknown }).scopes),
+  ]);
+
+  const isAdminByRole = Array.from(cfg.adminRoles).some((r) => roles.has(r));
+  const isAdminByScope = Array.from(cfg.adminScopes).some((s) => scopes.has(s));
+  return {
+    userId: verified.sub.trim(),
+    isAdmin: isAdminByRole || isAdminByScope,
+    roles,
+    scopes,
+    tokenId: typeof verified.jti === 'string' ? verified.jti : undefined,
+  };
+}
+
+function requestIp(req: IncomingMessage, cfg: ApiRuntimeConfig): string {
+  if (cfg.trustProxy) {
+    const fwd = req.headers['x-forwarded-for'];
+    if (typeof fwd === 'string') {
+      const first = fwd.split(',')[0]?.trim();
+      if (first) return first;
+    }
+  }
+  const socketIp = req.socket.remoteAddress?.trim();
+  return socketIp && socketIp.length > 0 ? socketIp : 'unknown';
+}
+
+function enforceApiRateLimit(auth: ApiAuthContext, ip: string, cfg: ApiRuntimeConfig): void {
+  const now = Date.now();
+  const key = `${auth.userId}|${ip}`;
+  const bucket = apiRateBuckets.get(key);
+  if (!bucket || now - bucket.windowStartMs >= API_RATE_WINDOW_MS) {
+    apiRateBuckets.set(key, { count: 1, windowStartMs: now });
+    return;
+  }
+  if (bucket.count >= cfg.rateLimitPerMinute) {
+    const retryAfterSec = Math.max(1, Math.ceil((API_RATE_WINDOW_MS - (now - bucket.windowStartMs)) / 1000));
+    throw new ApiHttpError(429, 'rate_limited', 'Rate limit exceeded', { retryAfterSec });
+  }
+  bucket.count += 1;
+}
+
+async function readJsonBody(req: IncomingMessage, maxBodyBytes: number): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  await new Promise<void>((resolve, reject) => {
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBodyBytes) {
+        reject(new ApiHttpError(413, 'payload_too_large', `Request body exceeds ${maxBodyBytes} bytes`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve());
+    req.on('error', (err) => reject(err));
+  });
+
+  if (size === 0) return {};
+  const bodyRaw = Buffer.concat(chunks).toString('utf8');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bodyRaw);
+  } catch {
+    throw new ApiHttpError(400, 'bad_request', 'Body must be valid JSON');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ApiHttpError(400, 'bad_request', 'Body must be a JSON object');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function bodyNumber(body: Record<string, unknown>, field: string): number {
+  const n = Number(body[field]);
+  if (!isFinite(n)) throw new ApiHttpError(400, 'bad_request', `Field '${field}' must be a number`);
+  return n;
+}
+
+function bodyInteger(body: Record<string, unknown>, field: string): number {
+  const n = Number(body[field]);
+  if (!isFinite(n) || Math.floor(n) !== n) throw new ApiHttpError(400, 'bad_request', `Field '${field}' must be an integer`);
+  return n;
+}
+
+function bodyString(body: Record<string, unknown>, field: string): string {
+  const value = body[field];
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new ApiHttpError(400, 'bad_request', `Field '${field}' must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+function optionalBoundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Number(value);
+  if (!isFinite(n) || Math.floor(n) !== n || n < min || n > max) {
+    throw new ApiHttpError(400, 'bad_request', `Integer value must be within [${min}, ${max}]`);
+  }
+  return n;
+}
+
+function sendApiJson(res: ServerResponse, statusCode: number, payload: Record<string, unknown>): void {
+  const json = JSON.stringify(payload);
+  res.statusCode = statusCode;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.end(json);
+}
+
+function requireAdmin(auth: ApiAuthContext): void {
+  if (!auth.isAdmin && !isAdmin(auth.userId)) {
+    throw new ApiHttpError(403, 'forbidden', 'Admin role/scope or configured admin user is required');
+  }
+}
+
+function parseOrderId(path: string, suffix: '' | '/time_left' | '/cancel' | '/payment_status' | '/mark_paid' = ''): string | undefined {
+  if (!path.startsWith('/orders/')) return undefined;
+  const rest = path.slice('/orders/'.length);
+  if (!suffix) {
+    if (!rest || rest.includes('/')) return undefined;
+    return decodeURIComponent(rest);
+  }
+  if (!rest.endsWith(suffix)) return undefined;
+  const orderId = rest.slice(0, -suffix.length);
+  if (!orderId || orderId.includes('/')) return undefined;
+  return decodeURIComponent(orderId);
+}
+
+function asApiError(err: unknown): ApiHttpError {
+  if (err instanceof ApiHttpError) return err;
+  return new ApiHttpError(500, 'internal_error', err instanceof Error ? err.message : 'Internal server error');
+}
+
 async function notifyUser(userId: string, message: string) {
   try {
     const user = await client.users.fetch(userId);
@@ -456,6 +791,380 @@ async function autoActivateConfirmedOrders(orderIds: string[]): Promise<number> 
     }
   }
   return activated;
+}
+
+async function financeSummaryData(): Promise<{
+  startLabel: string;
+  confirmedPaymentsCount: number;
+  revenueUsd: number;
+  nicehashOrdersCount: number;
+  spendBtc: number;
+  spendUsd?: number;
+  netUsd?: number;
+}> {
+  const revenue = await dbGet<{ totalUsd: number; count: number }>(
+    `SELECT COALESCE(SUM("usdAmount"), 0) AS "totalUsd", COUNT(*) AS count
+     FROM payment_intents
+     WHERE status = 'confirmed'
+       AND COALESCE("confirmedAt", "createdAt") >= ?`,
+    [FINANCE_SUMMARY_START_AT_MS]
+  );
+  const spend = await dbGet<{ totalBtc: number; count: number }>(
+    `SELECT COALESCE(SUM("nhAmount"), 0) AS "totalBtc", COUNT(*) AS count
+     FROM orders
+     WHERE "fulfillmentProvider" = 'nicehash'
+       AND "nhAmount" IS NOT NULL
+       AND "createdAt" >= ?`,
+    [FINANCE_SUMMARY_START_AT_MS]
+  );
+
+  const revenueUsd = Number(revenue?.totalUsd ?? 0);
+  const spendBtc = Number(spend?.totalBtc ?? 0);
+  const btcPrice = await btcUsd().catch(() => NaN);
+  const spendUsd = isFinite(btcPrice) ? spendBtc * btcPrice : undefined;
+  const netUsd = typeof spendUsd === 'number' ? revenueUsd - spendUsd : undefined;
+
+  return {
+    startLabel: FINANCE_SUMMARY_START_LABEL,
+    confirmedPaymentsCount: Number(revenue?.count ?? 0),
+    revenueUsd,
+    nicehashOrdersCount: Number(spend?.count ?? 0),
+    spendBtc,
+    spendUsd,
+    netUsd,
+  };
+}
+
+function canAccessOrderFromApi(auth: ApiAuthContext, orderUserId: string): boolean {
+  return auth.isAdmin || canAccessOrder(auth.userId, orderUserId);
+}
+
+async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: ApiRuntimeConfig): Promise<void> {
+  const method = (req.method ?? 'GET').toUpperCase();
+  const requestUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+  const pathname = requestUrl.pathname;
+
+  if (method === 'GET' && pathname === `${cfg.basePath}/health`) {
+    sendApiJson(res, 200, { ok: true, service: 'dhr-api', timestamp: new Date().toISOString() });
+    return;
+  }
+
+  if (!pathname.startsWith(cfg.basePath)) {
+    sendApiJson(res, 404, { ok: false, error: 'not_found', message: 'Route not found' });
+    return;
+  }
+
+  try {
+    const auth = parseApiAuth(req, cfg);
+    const ip = requestIp(req, cfg);
+    enforceApiRateLimit(auth, ip, cfg);
+    const routePath = pathname.slice(cfg.basePath.length) || '/';
+
+    if (method === 'POST' && routePath === '/quote') {
+      const body = await readJsonBody(req, cfg.maxBodyBytes);
+      const ph = bodyNumber(body, 'ph');
+      const hours = bodyInteger(body, 'hours');
+      const validationError = validateSizeDuration(ph, hours);
+      if (validationError) throw new ApiHttpError(400, 'validation_error', validationError);
+
+      let resolved: Awaited<ReturnType<typeof resolveFulfillmentQuote>>;
+      try {
+        resolved = await resolveFulfillmentQuote({ ph, hours, pool: 'quote', worker: 'quote' });
+        await ensureNhQuotedOrderSatisfiesMinimum({
+          ph,
+          hours,
+          usdPerPhDay: resolved.routingQuote.baseUsdPerPhDay,
+        });
+      } catch (err) {
+        throw new ApiHttpError(503, 'quote_unavailable', err instanceof Error ? err.message : 'Quote unavailable');
+      }
+
+      const q = resolved.pricedQuote;
+      const units = durationFactor(ph, hours);
+      const baseTotal = q.baseUsdPerPhDay * units;
+      const feeTotal = q.feeUsdPerPhDay * units;
+      const marginTotal = q.marginUsdPerPhDay * units;
+      const bufferTotal = q.bufferUsdPerPhDay * units;
+      const feePct = q.baseUsdPerPhDay > 0 ? (q.feeUsdPerPhDay / q.baseUsdPerPhDay) * 100 : 0;
+
+      sendApiJson(res, 200, {
+        ok: true,
+        provider: resolved.provider,
+        quote: {
+          ph,
+          hours,
+          source: q.source,
+          totalUsd: q.totalUsd,
+          unitUsdPerPhDay: q.usdPerPhDay,
+          btcPriceUsd: resolved.btcPrice,
+          breakdown: {
+            baseUsdPerPhDay: q.baseUsdPerPhDay,
+            feeUsdPerPhDay: q.feeUsdPerPhDay,
+            marginUsdPerPhDay: q.marginUsdPerPhDay,
+            bufferUsdPerPhDay: q.bufferUsdPerPhDay,
+            baseTotalUsd: baseTotal,
+            feeTotalUsd: feeTotal,
+            marginTotalUsd: marginTotal,
+            bufferTotalUsd: bufferTotal,
+            feePercent: feePct,
+          },
+        },
+        paymentMethods: {
+          usdcBaseAddress: paymentUsdcBaseAddress(),
+          usdcSolAddress: paymentUsdcSolAddress(),
+          btcOnchainAddress: paymentBtcAddress(),
+          estimatedUsdcAmount: Number(q.totalUsd.toFixed(6)),
+          estimatedBtcAmount: Number((q.totalUsd / resolved.btcPrice).toFixed(8)),
+        },
+      });
+      return;
+    }
+
+    if (method === 'POST' && routePath === '/rent') {
+      const body = await readJsonBody(req, cfg.maxBodyBytes);
+      const ph = bodyNumber(body, 'ph');
+      const hours = bodyInteger(body, 'hours');
+      const pool = bodyString(body, 'pool');
+      const worker = bodyString(body, 'worker');
+
+      const validationError = validateSizeDuration(ph, hours);
+      if (validationError) throw new ApiHttpError(400, 'validation_error', validationError);
+      if (!isValidWorkerName(worker)) {
+        throw new ApiHttpError(400, 'validation_error', 'Worker must be a valid BTC mainnet address only (no suffix like .worker, no dots)');
+      }
+      const poolOk = validatePool(pool);
+      if (!poolOk.valid) {
+        throw new ApiHttpError(400, 'validation_error', `Pool not allowed: ${poolOk.reason ?? 'invalid pool'}`);
+      }
+
+      let resolved: Awaited<ReturnType<typeof resolveFulfillmentQuote>>;
+      try {
+        resolved = await resolveFulfillmentQuote({ ph, hours, pool, worker });
+      } catch (err) {
+        throw new ApiHttpError(503, 'quote_unavailable', err instanceof Error ? err.message : 'No valid quote available');
+      }
+
+      if (resolved.provider === 'nicehash') {
+        const nhBal = await nicehashBalanceUsd();
+        const nhGate = (process.env.NICEHASH_GATE_ENABLED ?? 'true').toLowerCase() !== 'false';
+        if (nhGate && (!isFinite(nhBal.usd) || nhBal.usd < 50)) {
+          throw new ApiHttpError(503, 'provider_unavailable', 'NiceHash account balance is low. Please check back later.');
+        }
+        try {
+          await ensureNhOrderSatisfiesMinimum({
+            ph,
+            hours,
+            poolUrl: pool,
+            worker,
+            usdPerPhDay: resolved.routingQuote.baseUsdPerPhDay,
+          });
+        } catch (err) {
+          throw new ApiHttpError(
+            400,
+            'validation_error',
+            `Order rejected before creation: ${err instanceof Error ? err.message : 'minimum requirements not met'}`
+          );
+        }
+      }
+
+      const order = await createOrder({
+        ph,
+        hours,
+        pool,
+        worker,
+        requestedProvider: resolved.provider,
+        user: auth.userId,
+        totalUsd: resolved.pricedQuote.totalUsd,
+      });
+      const payment = await ensurePaymentIntent({
+        orderId: order.id,
+        userId: auth.userId,
+        totalUsd: order.totalUsd,
+        btcUsd: resolved.btcPrice,
+        expiresAt: order.expiresAt ?? Date.now() + hours * 3600 * 1000,
+      });
+
+      sendApiJson(res, 201, {
+        ok: true,
+        message: 'Order created',
+        order,
+        payment: {
+          id: payment.id,
+          status: payment.status,
+          reference: payment.reference,
+          expiresAt: payment.expiresAt,
+          usdcBaseAddress: paymentUsdcBaseAddress(),
+          usdcSolAddress: paymentUsdcSolAddress(),
+          btcOnchainAddress: paymentBtcAddress(),
+          usdcBaseAmount: payment.usdcBaseAmount,
+          usdcSolAmount: payment.usdcSolAmount,
+          btcAmount: payment.btcAmount,
+        },
+      });
+      return;
+    }
+
+    const orderStatusId = method === 'GET' ? parseOrderId(routePath) : undefined;
+    if (method === 'GET' && orderStatusId) {
+      const o = await getOrder(orderStatusId);
+      if (!o) throw new ApiHttpError(404, 'not_found', 'Order not found');
+      if (!canAccessOrderFromApi(auth, o.user)) throw new ApiHttpError(403, 'forbidden', 'Not authorized');
+      sendApiJson(res, 200, {
+        ok: true,
+        order: {
+          id: o.id,
+          status: o.status,
+          requestedProvider: o.requestedProvider,
+          fulfillmentProvider: o.fulfillmentProvider,
+          ph: o.ph,
+          hours: o.hours,
+          pool: o.pool,
+          worker: o.worker,
+          expiresAt: o.expiresAt,
+          createdAt: o.createdAt,
+        },
+      });
+      return;
+    }
+
+    const orderTimeLeftId = method === 'GET' ? parseOrderId(routePath, '/time_left') : undefined;
+    if (method === 'GET' && orderTimeLeftId) {
+      const o = await getOrder(orderTimeLeftId);
+      if (!o) throw new ApiHttpError(404, 'not_found', 'Order not found');
+      if (!canAccessOrderFromApi(auth, o.user)) throw new ApiHttpError(403, 'forbidden', 'Not authorized');
+      if (o.status !== 'active') {
+        throw new ApiHttpError(409, 'invalid_state', `Order ${orderTimeLeftId} is not active (status: ${o.status})`);
+      }
+      if (!o.expiresAt) throw new ApiHttpError(409, 'invalid_state', `Order ${orderTimeLeftId} has no expiry timestamp`);
+      const leftMs = o.expiresAt - Date.now();
+      sendApiJson(res, 200, {
+        ok: true,
+        orderId: orderTimeLeftId,
+        active: leftMs > 0,
+        timeLeftMs: Math.max(0, leftMs),
+        timeLeftHuman: formatRemaining(Math.max(0, leftMs)),
+        endsAt: o.expiresAt,
+      });
+      return;
+    }
+
+    const orderCancelId = method === 'POST' ? parseOrderId(routePath, '/cancel') : undefined;
+    if (method === 'POST' && orderCancelId) {
+      const o = await getOrder(orderCancelId);
+      if (!o) throw new ApiHttpError(404, 'not_found', 'Order not found');
+      if (!canAccessOrderFromApi(auth, o.user)) throw new ApiHttpError(403, 'forbidden', 'Not authorized');
+      const message = await cancelOrder(orderCancelId);
+      sendApiJson(res, 200, { ok: true, orderId: orderCancelId, message });
+      return;
+    }
+
+    const orderPaymentStatusId = method === 'GET' ? parseOrderId(routePath, '/payment_status') : undefined;
+    if (method === 'GET' && orderPaymentStatusId) {
+      const o = await getOrder(orderPaymentStatusId);
+      if (!o) throw new ApiHttpError(404, 'not_found', 'Order not found');
+      if (!canAccessOrderFromApi(auth, o.user)) throw new ApiHttpError(403, 'forbidden', 'Not authorized');
+      const p = await getPaymentIntentByOrder(orderPaymentStatusId);
+      if (!p) throw new ApiHttpError(404, 'not_found', 'Payment intent not found for order');
+      sendApiJson(res, 200, {
+        ok: true,
+        orderId: orderPaymentStatusId,
+        payment: {
+          id: p.id,
+          status: p.status,
+          reference: p.reference,
+          usdcBaseAddress: paymentUsdcBaseAddress(),
+          usdcSolAddress: paymentUsdcSolAddress(),
+          btcOnchainAddress: paymentBtcAddress(),
+          usdcBaseAmount: p.usdcBaseAmount,
+          usdcSolAmount: p.usdcSolAmount,
+          btcAmount: p.btcAmount,
+          expiresAt: p.expiresAt,
+          confirmedMethod: p.confirmedMethod,
+          confirmedTxId: p.confirmedTxId,
+          confirmedAt: p.confirmedAt,
+          notes: p.notes,
+        },
+      });
+      return;
+    }
+
+    const orderMarkPaidId = method === 'POST' ? parseOrderId(routePath, '/mark_paid') : undefined;
+    if (method === 'POST' && orderMarkPaidId) {
+      requireAdmin(auth);
+      const begin = await beginFulfillment(orderMarkPaidId);
+      if (begin === 'not_found') throw new ApiHttpError(404, 'not_found', 'Order not found');
+      if (begin === 'already_processing') throw new ApiHttpError(409, 'invalid_state', `Order ${orderMarkPaidId} fulfillment already in progress`);
+      if (begin === 'not_awaiting_payment') {
+        const current = await getOrder(orderMarkPaidId);
+        throw new ApiHttpError(409, 'invalid_state', `Order ${orderMarkPaidId} not awaiting payment (status ${current?.status ?? 'unknown'})`);
+      }
+      try {
+        const requireVerified = (process.env.REQUIRE_PAYMENT_CONFIRMATION_FOR_MARK_PAID ?? 'false').toLowerCase() === 'true';
+        const message = await fulfillOrder(orderMarkPaidId, requireVerified);
+        sendApiJson(res, 200, { ok: true, orderId: orderMarkPaidId, message });
+      } catch (err) {
+        await rollbackFulfillment(orderMarkPaidId).catch((rollbackErr) => console.error('fulfillment rollback failed', rollbackErr));
+        throw new ApiHttpError(500, 'fulfillment_error', err instanceof Error ? err.message : 'Fulfillment error');
+      }
+      return;
+    }
+
+    if (method === 'POST' && routePath === '/payments/verify') {
+      requireAdmin(auth);
+      const summary = await runPaymentVerificationTick();
+      const activated = await autoActivateConfirmedOrders(summary.confirmedOrderIds);
+      sendApiJson(res, 200, {
+        ok: true,
+        checked: summary.checked,
+        confirmed: summary.confirmed,
+        expired: summary.expired,
+        autoActivated: activated,
+      });
+      return;
+    }
+
+    if (method === 'POST' && routePath === '/payments/verify_debug') {
+      requireAdmin(auth);
+      const body = await readJsonBody(req, cfg.maxBodyBytes);
+      const limit = optionalBoundedInteger(body.limit ?? requestUrl.searchParams.get('limit'), 10, 1, 20);
+      const debug = await runPaymentVerificationDebug({ maxIntents: limit });
+      sendApiJson(res, 200, { ok: true, debug });
+      return;
+    }
+
+    if (method === 'GET' && routePath === '/finance/summary') {
+      requireAdmin(auth);
+      const summary = await financeSummaryData();
+      sendApiJson(res, 200, { ok: true, summary });
+      return;
+    }
+
+    sendApiJson(res, 404, { ok: false, error: 'not_found', message: 'Route not found' });
+  } catch (err) {
+    const apiErr = asApiError(err);
+    const payload: Record<string, unknown> = {
+      ok: false,
+      error: apiErr.errorCode,
+      message: apiErr.message,
+    };
+    if (apiErr.details !== undefined) payload.details = apiErr.details;
+    sendApiJson(res, apiErr.statusCode, payload);
+  }
+}
+
+function startRestApiServer(): void {
+  const cfg = loadApiRuntimeConfig();
+  if (!cfg) {
+    console.log('REST API disabled (REST_API_ENABLED=false)');
+    return;
+  }
+
+  const server = createServer((req, res) => {
+    void handleApiRequest(req, res, cfg);
+  });
+  server.listen(cfg.port, cfg.host, () => {
+    console.log(`REST API listening on http://${cfg.host}:${cfg.port}${cfg.basePath}`);
+  });
 }
 
 client.on('interactionCreate', async (interaction) => {
@@ -926,35 +1635,15 @@ async function handleFinanceSummary(interaction: ChatInputCommandInteraction) {
     return;
   }
 
-  const revenue = await dbGet<{ totalUsd: number; count: number }>(
-    `SELECT COALESCE(SUM("usdAmount"), 0) AS "totalUsd", COUNT(*) AS count
-     FROM payment_intents
-     WHERE status = 'confirmed'
-       AND COALESCE("confirmedAt", "createdAt") >= ?`,
-    [FINANCE_SUMMARY_START_AT_MS]
-  );
-  const spend = await dbGet<{ totalBtc: number; count: number }>(
-    `SELECT COALESCE(SUM("nhAmount"), 0) AS "totalBtc", COUNT(*) AS count
-     FROM orders
-     WHERE "fulfillmentProvider" = 'nicehash'
-       AND "nhAmount" IS NOT NULL
-       AND "createdAt" >= ?`,
-    [FINANCE_SUMMARY_START_AT_MS]
-  );
-
-  const totalRevenueUsd = Number(revenue?.totalUsd ?? 0);
-  const totalSpendBtc = Number(spend?.totalBtc ?? 0);
-  const btcPrice = await btcUsd().catch(() => NaN);
-  const totalSpendUsd = isFinite(btcPrice) ? totalSpendBtc * btcPrice : NaN;
-  const netUsd = isFinite(totalSpendUsd) ? totalRevenueUsd - totalSpendUsd : NaN;
+  const summary = await financeSummaryData();
 
   const lines = [
-    `Finance summary since ${FINANCE_SUMMARY_START_LABEL}`,
-    `Confirmed payments: ${Number(revenue?.count ?? 0)} -> $${totalRevenueUsd.toFixed(2)} revenue`,
-    `NiceHash orders: ${Number(spend?.count ?? 0)} -> ${totalSpendBtc.toFixed(8)} BTC spent${
-      isFinite(totalSpendUsd) ? ` (~$${totalSpendUsd.toFixed(2)})` : ' (USD conversion unavailable)'
+    `Finance summary since ${summary.startLabel}`,
+    `Confirmed payments: ${summary.confirmedPaymentsCount} -> $${summary.revenueUsd.toFixed(2)} revenue`,
+    `NiceHash orders: ${summary.nicehashOrdersCount} -> ${summary.spendBtc.toFixed(8)} BTC spent${
+      typeof summary.spendUsd === 'number' ? ` (~$${summary.spendUsd.toFixed(2)})` : ' (USD conversion unavailable)'
     }`,
-    isFinite(netUsd) ? `Net (revenue - spend): $${netUsd.toFixed(2)}` : 'Net (revenue - spend): unavailable',
+    typeof summary.netUsd === 'number' ? `Net (revenue - spend): $${summary.netUsd.toFixed(2)}` : 'Net (revenue - spend): unavailable',
   ];
   await interaction.reply({ content: lines.join('\n'), ephemeral: true });
 }
@@ -962,6 +1651,7 @@ async function handleFinanceSummary(interaction: ChatInputCommandInteraction) {
 async function start() {
   await ensureDbReady();
   console.log(`Database backend: ${dbBackend()}`);
+  startRestApiServer();
   await registerCommands();
   await client.login(token);
   await restoreOrderExpirySchedules();

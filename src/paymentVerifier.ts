@@ -103,6 +103,24 @@ function isEvmAddress(value: string): boolean {
   return /^0x[0-9a-f]{40}$/i.test(value.trim());
 }
 
+function normalizedEvmAddress(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function maxBackSkewMs(): number {
+  return Math.max(0, Number(process.env.PAYMENT_MAX_BACK_SKEW_SEC ?? '900')) * 1000;
+}
+
+function oldestIntentCreatedAtMs(intents: PaymentIntent[]): number | undefined {
+  if (intents.length === 0) return undefined;
+  let oldest = Number.POSITIVE_INFINITY;
+  for (const intent of intents) {
+    const createdAt = Number(intent.createdAt);
+    if (isFinite(createdAt) && createdAt > 0 && createdAt < oldest) oldest = createdAt;
+  }
+  return isFinite(oldest) ? oldest : undefined;
+}
+
 function toUsdcUnits(amount: number): bigint | undefined {
   if (!isFinite(amount) || amount <= 0) return undefined;
   return BigInt(Math.round(amount * 1_000_000));
@@ -132,17 +150,34 @@ async function rpcJson(url: string, method: string, params: any[]): Promise<any>
   return payload?.result;
 }
 
-async function fetchBaseUsdcTransfers(toAddress: string): Promise<UsdcBaseTransfer[]> {
+async function fetchBaseUsdcTransfers(
+  toAddress: string,
+  opts?: { oldestIntentCreatedAtMs?: number }
+): Promise<UsdcBaseTransfer[]> {
   const rpcUrl = envTrimmed('BASE_RPC_URL') || 'https://mainnet.base.org';
   const tokenAddress = envTrimmed('USDC_BASE_TOKEN') || BASE_USDC_MAINNET_TOKEN;
-  const recipient = toAddress.trim();
+  const recipient = normalizedEvmAddress(toAddress);
+  const tokenAddressNormalized = normalizedEvmAddress(tokenAddress);
+  if (tokenAddressNormalized === recipient) {
+    throw new Error('PAYMENT_USDC_BASE and USDC_BASE_TOKEN are identical; PAYMENT_USDC_BASE must be your receiving wallet');
+  }
   const latestHex = String(await rpcJson(rpcUrl, 'eth_blockNumber', []));
   if (!isHex(latestHex)) throw new Error('invalid eth_blockNumber result');
   const latest = Number(BigInt(latestHex));
-  const scanBlocks = Math.max(500, Number(process.env.PAYMENT_BASE_SCAN_BLOCKS ?? '5000'));
+  const configuredScanBlocks = Math.max(500, Number(process.env.PAYMENT_BASE_SCAN_BLOCKS ?? '5000'));
+  const maxScanBlocks = Math.max(
+    configuredScanBlocks,
+    Number(process.env.PAYMENT_BASE_MAX_SCAN_BLOCKS ?? String(configuredScanBlocks))
+  );
+  const oldestPendingMs = opts?.oldestIntentCreatedAtMs;
+  const adaptiveBlocks =
+    typeof oldestPendingMs === 'number' && oldestPendingMs > 0
+      ? Math.ceil(Math.max(0, Date.now() - oldestPendingMs + maxBackSkewMs()) / 2000) // Base block time is about ~2s.
+      : configuredScanBlocks;
+  const scanBlocks = Math.min(maxScanBlocks, Math.max(configuredScanBlocks, adaptiveBlocks));
   const from = Math.max(0, latest - scanBlocks);
   const filter = {
-    address: tokenAddress,
+    address: tokenAddressNormalized,
     topics: [ERC20_TRANSFER_TOPIC, null, topicForEvmAddress(recipient)],
     fromBlock: `0x${from.toString(16)}`,
     toBlock: `0x${latest.toString(16)}`,
@@ -269,31 +304,54 @@ async function resolveSolUsdcRecipientAccounts(
   return Array.from(out);
 }
 
-async function fetchSolUsdcTransfers(recipientAddress: string): Promise<UsdcSolTransfer[]> {
+async function fetchSolUsdcTransfers(
+  recipientAddress: string,
+  opts?: { oldestIntentCreatedAtMs?: number }
+): Promise<UsdcSolTransfer[]> {
   const rpcUrl = envTrimmed('SOLANA_RPC_URL') || 'https://api.mainnet-beta.solana.com';
   const mint = envTrimmed('USDC_SOL_MINT') || SOL_USDC_MAINNET_MINT;
   const recipient = recipientAddress.trim();
   const recipientAccounts = await resolveSolUsdcRecipientAccounts(recipient, rpcUrl, mint);
   if (recipientAccounts.length === 0) return [];
-  const limit = Math.max(20, Number(process.env.PAYMENT_SOL_SCAN_LIMIT ?? '200'));
+  const maxSignaturesPerAccount = Math.max(20, Number(process.env.PAYMENT_SOL_SCAN_LIMIT ?? '400'));
+  const pageSize = Math.max(20, Math.min(1000, Number(process.env.PAYMENT_SOL_PAGE_SIZE ?? '200')));
+  const minAcceptedMs =
+    typeof opts?.oldestIntentCreatedAtMs === 'number' && opts.oldestIntentCreatedAtMs > 0
+      ? opts.oldestIntentCreatedAtMs - maxBackSkewMs()
+      : undefined;
 
-  const signatures = new Set<string>();
+  const signatures = new Map<string, number | undefined>(); // signature -> blockTimeMs (if provided by RPC)
   let signatureScanWorked = false;
   let lastScanError: unknown;
   for (const account of recipientAccounts) {
     try {
-      const sigs: any[] =
-        (await rpcJson(rpcUrl, 'getSignaturesForAddress', [
-          account,
-          {
-            limit,
-          },
-        ])) ?? [];
-      signatureScanWorked = true;
-      if (!Array.isArray(sigs) || sigs.length === 0) continue;
-      for (const s of sigs) {
-        const signature = String(s?.signature || '');
-        if (signature) signatures.add(signature);
+      let fetched = 0;
+      let before: string | undefined;
+      while (fetched < maxSignaturesPerAccount) {
+        const take = Math.min(pageSize, maxSignaturesPerAccount - fetched);
+        const params: any = { limit: take };
+        if (before) params.before = before;
+
+        const sigs: any[] = (await rpcJson(rpcUrl, 'getSignaturesForAddress', [account, params])) ?? [];
+        signatureScanWorked = true;
+        if (!Array.isArray(sigs) || sigs.length === 0) break;
+
+        fetched += sigs.length;
+        for (const s of sigs) {
+          const signature = String(s?.signature || '');
+          if (!signature) continue;
+          const blockTimeMs = Number(s?.blockTime || 0) > 0 ? Number(s.blockTime) * 1000 : undefined;
+          const existing = signatures.get(signature);
+          signatures.set(signature, existing === undefined ? blockTimeMs : Math.max(existing, blockTimeMs ?? existing));
+        }
+
+        const oldest = sigs[sigs.length - 1];
+        const oldestSig = String(oldest?.signature || '');
+        if (!oldestSig) break;
+        before = oldestSig;
+        const oldestMs = Number(oldest?.blockTime || 0) > 0 ? Number(oldest.blockTime) * 1000 : undefined;
+        if (minAcceptedMs && oldestMs && oldestMs < minAcceptedMs) break;
+        if (sigs.length < take) break;
       }
     } catch (err) {
       lastScanError = err;
@@ -308,12 +366,20 @@ async function fetchSolUsdcTransfers(recipientAddress: string): Promise<UsdcSolT
   const transfers: UsdcSolTransfer[] = [];
   const recipientAccountSet = new Set(recipientAccounts);
   const recipientOwnerSet = new Set<string>([recipient]);
-  for (const signature of signatures) {
+  const sortedSignatures = Array.from(signatures.entries())
+    .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
+    .map(([sig]) => sig);
+  const txVersionRaw = Number(process.env.SOLANA_MAX_TX_VERSION ?? '0');
+  const txConfig: any = { encoding: 'jsonParsed' };
+  if (isFinite(txVersionRaw) && txVersionRaw >= 0) {
+    txConfig.maxSupportedTransactionVersion = Math.floor(txVersionRaw);
+  }
+
+  for (const signature of sortedSignatures) {
+    const hintedTimeMs = signatures.get(signature);
+    if (minAcceptedMs && hintedTimeMs && hintedTimeMs < minAcceptedMs) break;
     try {
-      const tx: any = await rpcJson(rpcUrl, 'getTransaction', [
-        signature,
-        { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 },
-      ]);
+      const tx: any = await rpcJson(rpcUrl, 'getTransaction', [signature, txConfig]);
       if (!tx || tx?.meta?.err) continue;
       const delta = parseSolTransferDeltaUnits(tx, recipientAccountSet, recipientOwnerSet, mint);
       if (delta <= 0n) continue;
@@ -594,6 +660,7 @@ export async function runPaymentVerificationTick(): Promise<VerifySummary> {
   const expired = await expireStalePaymentIntents();
   const intents = await listPendingPaymentIntents();
   if (intents.length === 0) return { checked: 0, confirmed: 0, expired, confirmedOrderIds: [] };
+  const oldestIntentMs = oldestIntentCreatedAtMs(intents);
 
   let btcTxs: any[] = [];
   const btcAddress = paymentBtcAddress();
@@ -612,7 +679,7 @@ export async function runPaymentVerificationTick(): Promise<VerifySummary> {
       console.warn(`payment verifier usdc base scan skipped: PAYMENT_USDC_BASE is not a hex EVM address (${usdcBaseAddress})`);
     } else {
       try {
-        usdcBaseTransfers = await fetchBaseUsdcTransfers(usdcBaseAddress);
+        usdcBaseTransfers = await fetchBaseUsdcTransfers(usdcBaseAddress, { oldestIntentCreatedAtMs: oldestIntentMs });
       } catch (err) {
         console.error('payment verifier usdc base scan error', err);
       }
@@ -623,7 +690,7 @@ export async function runPaymentVerificationTick(): Promise<VerifySummary> {
   const usdcSolAddress = paymentUsdcSolAddress();
   if (usdcSolAddress && shouldTryUsdcSol(intents)) {
     try {
-      usdcSolTransfers = await fetchSolUsdcTransfers(usdcSolAddress);
+      usdcSolTransfers = await fetchSolUsdcTransfers(usdcSolAddress, { oldestIntentCreatedAtMs: oldestIntentMs });
     } catch (err) {
       console.error('payment verifier usdc sol scan error', err);
     }
@@ -692,6 +759,7 @@ export async function runPaymentVerificationDebug(opts?: { maxIntents?: number }
   const intentsRaw = await listPendingPaymentIntents();
   const maxIntents = Math.max(1, Math.min(100, Number(opts?.maxIntents ?? 10)));
   const intents = intentsRaw.slice(0, maxIntents);
+  const oldestIntentMs = oldestIntentCreatedAtMs(intents);
 
   let btcTxs: any[] = [];
   const btcAddress = paymentBtcAddress();
@@ -712,7 +780,7 @@ export async function runPaymentVerificationDebug(opts?: { maxIntents?: number }
       );
     } else {
       try {
-        usdcBaseTransfers = await fetchBaseUsdcTransfers(usdcBaseAddress);
+        usdcBaseTransfers = await fetchBaseUsdcTransfers(usdcBaseAddress, { oldestIntentCreatedAtMs: oldestIntentMs });
       } catch (err) {
         console.error('payment verifier debug usdc base scan error', err);
       }
@@ -723,7 +791,7 @@ export async function runPaymentVerificationDebug(opts?: { maxIntents?: number }
   const usdcSolAddress = paymentUsdcSolAddress();
   if (usdcSolAddress && shouldTryUsdcSol(intents)) {
     try {
-      usdcSolTransfers = await fetchSolUsdcTransfers(usdcSolAddress);
+      usdcSolTransfers = await fetchSolUsdcTransfers(usdcSolAddress, { oldestIntentCreatedAtMs: oldestIntentMs });
     } catch (err) {
       console.error('payment verifier debug usdc sol scan error', err);
     }

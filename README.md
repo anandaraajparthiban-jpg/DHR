@@ -11,6 +11,7 @@
 - Payments: each order gets a payment intent with unique amounts + reference; verifier loop confirms BTC, USDC on Base (ERC20 logs), and USDC on Solana (SPL token balance deltas).
 - Auto-start after payment: confirmed payments can auto-activate orders (`AUTO_ACTIVATE_ON_PAYMENT=true`).
 - Timed termination + notifications: active orders are auto-terminated on expiry and users are DM-notified on start/end.
+- Optional REST API with JWT auth mirrors bot flows for third-party integrations.
 - Pool management: NiceHash pool create/reuse helper (cached by host/port/user); allowlist + regex validation for pools.
 - Comments added across core files for handoff (index.ts, pricing.ts, balances.ts, orders.ts, nh.ts, nhOrder.ts, braiins.ts, pool.ts).
 
@@ -24,24 +25,58 @@
 - `/quote ph:<number> hours:<int>` — price with breakdown (NiceHash source).
 - `/rent ph:<number> hours:<int> pool:<stratum url> worker:<btc-address>` — place order (NiceHash fulfillment).
 - `/status id:<order-id>` — check status (DB-backed).
+- `/time_left id:<order-id>` — active order remaining time.
 - `/cancel id:<order-id>` — cancel if not active.
 - `/payment_status id:<order-id>` — see payment intent status + expected amounts/reference.
 - `/mark_paid id:<order-id>` — admin only; activates on NiceHash.
 - `/verify_payments` — admin only; run payment verification tick immediately.
 - `/verify_payments_debug limit:<1-20?>` — admin only; diagnostic reasons for payment-match decisions.
+- `/finance_summary` — admin only; revenue vs NiceHash spend.
+
+## REST API (JWT secured)
+Enable with:
+- `REST_API_ENABLED=true`
+- `API_JWT_ALGORITHM=HS256|RS256`
+- `API_JWT_ISSUER`, `API_JWT_AUDIENCE`
+- HS256: `API_JWT_SECRET` (>= 32 chars)
+- RS256: `API_JWT_PUBLIC_KEY` (PEM; `\n` escapes supported)
+
+Security controls:
+- Bearer JWT required on all routes except `GET /health`
+- token must include `sub` and `exp` (`jti` required by default)
+- issuer/audience enforced
+- admin routes require role/scope (`API_ADMIN_ROLES`, `API_ADMIN_SCOPES`)
+- per-user/IP rate limiting (`API_RATE_LIMIT_PER_MIN`)
+
+Base path default: `/api/v1`
+
+Routes:
+- `GET /health`
+- `POST /quote`
+- `POST /rent`
+- `GET /orders/:id`
+- `GET /orders/:id/time_left`
+- `POST /orders/:id/cancel`
+- `GET /orders/:id/payment_status`
+- `POST /orders/:id/mark_paid` (admin)
+- `POST /payments/verify` (admin)
+- `POST /payments/verify_debug` (admin)
+- `GET /finance/summary` (admin)
 
 ## Setup
 1) Install deps: `npm install`
 2) Copy env: `cp .env.example .env` and fill values:
    - Discord: `DISCORD_TOKEN`, `DISCORD_APP_ID`, `DISCORD_PUBLIC_KEY`
+   - REST API (optional): `REST_API_ENABLED`, `REST_API_HOST`, `REST_API_PORT`, `REST_API_BASE_PATH`
+   - JWT auth for REST API: `API_JWT_ALGORITHM`, `API_JWT_SECRET` or `API_JWT_PUBLIC_KEY`, `API_JWT_ISSUER`, `API_JWT_AUDIENCE`, `API_JWT_REQUIRE_JTI`, `API_JWT_CLOCK_TOLERANCE_SEC`, `API_ADMIN_ROLES`, `API_ADMIN_SCOPES`, `API_RATE_LIMIT_PER_MIN`
    - Database:
      - SQLite (default): `DB_BACKEND=sqlite`
      - Postgres: set `DB_BACKEND=postgres` and `DATABASE_URL` (optional TLS flags: `PGSSL=true` or `PGSSLMODE=require`)
    - NiceHash: `NICEHASH_API_KEY`, `NICEHASH_API_SECRET`, `NICEHASH_ORG_ID`; optional `NICEHASH_API_BASE`, `NICEHASH_BAL_OVERRIDE_BTC`, `NICEHASH_GATE_ENABLED`
    - Braiins: `BRAIINS_OWNER_TOKEN` or `BRAIINS_READONLY_TOKEN` (spot), optional `BRAIINS_BASE`
-   - Payments: `PAYMENT_USDC_BASE`, `PAYMENT_USDC_SOL`, `PAYMENT_BTC_ONCHAIN`, `PAYMENT_VERIFY_INTERVAL_SEC`, `PAYMENT_BTC_SAT_TOLERANCE`, `PAYMENT_ACCEPT_UNCONFIRMED`, `PAYMENT_MAX_BACK_SKEW_SEC`, `REQUIRE_PAYMENT_CONFIRMATION_FOR_MARK_PAID`, `AUTO_ACTIVATE_ON_PAYMENT`
-   - USDC Base verify: `BASE_RPC_URL`, `USDC_BASE_TOKEN`, `PAYMENT_BASE_SCAN_BLOCKS`, `PAYMENT_USDC_BASE_TOLERANCE_UNITS`
-   - USDC Solana verify: `SOLANA_RPC_URL`, `USDC_SOL_MINT`, `PAYMENT_SOL_SCAN_LIMIT`, `PAYMENT_USDC_SOL_TOLERANCE_UNITS`
+   - Payments: `PAYMENT_USDC_BASE` (Base recipient wallet, `0x...`), `PAYMENT_USDC_SOL` (Solana wallet or USDC token account), `PAYMENT_BTC_ONCHAIN`, `PAYMENT_VERIFY_INTERVAL_SEC`, `PAYMENT_BTC_SAT_TOLERANCE`, `PAYMENT_ACCEPT_UNCONFIRMED`, `PAYMENT_MAX_BACK_SKEW_SEC`, `REQUIRE_PAYMENT_CONFIRMATION_FOR_MARK_PAID`, `AUTO_ACTIVATE_ON_PAYMENT`
+   - USDC Base verify: `BASE_RPC_URL`, `USDC_BASE_TOKEN` (Base USDC token contract, not your wallet), `PAYMENT_BASE_SCAN_BLOCKS`, `PAYMENT_BASE_MAX_SCAN_BLOCKS`, `PAYMENT_USDC_BASE_TOLERANCE_UNITS`
+   - USDC Solana verify: `SOLANA_RPC_URL`, `USDC_SOL_MINT`, `PAYMENT_SOL_SCAN_LIMIT`, `PAYMENT_SOL_PAGE_SIZE`, `SOLANA_MAX_TX_VERSION`, `PAYMENT_USDC_SOL_TOLERANCE_UNITS`
    - NiceHash minimums: market minimum order amount is `0.001 BTC`; configured minimum start amount is `NICEHASH_MIN_START_AMOUNT_BTC` (default `0.0011 BTC`)
    - Fulfillment retries: `FULFILLMENT_TERMINATION_RETRY_SEC`
    - Pricing: `PRICE_MARGIN_BPS`, `BETA_BUFFER_BPS`, `NICEHASH_FEE_BPS`, `BRAIINS_FEE_BPS`, `FLOOR_USD_PER_PH_DAY`, optional `INTERNAL_CAPACITY_USD_PER_PH_DAY`
