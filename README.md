@@ -111,6 +111,7 @@ Routes:
 Production step-by-step guide: `docs/production-install.md`
 Production go-live gate: `docs/production-go-live-checklist.md`
 Detailed user manual: `docs/user-manual.md`
+REST API guide (cURL): `docs/rest-api.md`
 
 ## Remaining TODO
 - Fix Braiins spot ordering (working base/token) and Braiins quoting.
