@@ -28,6 +28,16 @@ import { nicehashBalanceUsd } from './balances.js';
 import { createNhOrder, cancelNhOrder, ensureNhOrderSatisfiesMinimum, ensureNhQuotedOrderSatisfiesMinimum } from './nhOrder.js';
 import { ensurePaymentIntent, getPaymentIntentByOrder } from './payments.js';
 import { runPaymentVerificationTick, runPaymentVerificationDebug, startPaymentVerificationLoop } from './paymentVerifier.js';
+import {
+  ApiUserAccount,
+  apiUsernameKey,
+  createApiUser,
+  getApiUserByUsername,
+  listApiUsers,
+  touchApiUserLastLogin,
+  updateApiUser,
+  upsertApiUserIfMissing,
+} from './apiUsers.js';
 
 type FulfillmentProvider = 'nicehash';
 type SupportedJwtAlgorithm = 'HS256' | 'RS256';
@@ -50,7 +60,7 @@ interface ApiRuntimeConfig {
   loginRateLimitPerMinute: number;
   adminRoles: Set<string>;
   adminScopes: Set<string>;
-  credentials: Map<string, ApiAuthCredential>;
+  bootstrapCredentials: Map<string, ApiAuthCredential>;
 }
 
 interface ApiAuthContext {
@@ -67,6 +77,11 @@ interface ApiAuthCredential {
   passwordHash: string;
   roles: Set<string>;
   scopes: Set<string>;
+}
+
+interface ResolvedLoginCredential {
+  credential: ApiAuthCredential;
+  dbUserId?: string;
 }
 
 class ApiHttpError extends Error {
@@ -452,7 +467,7 @@ function parseCredentialFromObject(
   };
 }
 
-function loadApiCredentials(fallbackRoles: Set<string>, fallbackScopes: Set<string>): Map<string, ApiAuthCredential> {
+function loadApiBootstrapCredentials(fallbackRoles: Set<string>, fallbackScopes: Set<string>): Map<string, ApiAuthCredential> {
   const out = new Map<string, ApiAuthCredential>();
   const credentialsJson = envTrimmed('API_AUTH_CREDENTIALS_JSON');
 
@@ -503,9 +518,7 @@ function loadApiCredentials(fallbackRoles: Set<string>, fallbackScopes: Set<stri
     return out;
   }
 
-  throw new Error(
-    'No API auth credentials configured. Set API_AUTH_CREDENTIALS_JSON or API_AUTH_USERNAME/API_AUTH_PASSWORD_HASH.'
-  );
+  return out;
 }
 
 function loadApiRuntimeConfig(): ApiRuntimeConfig | undefined {
@@ -539,7 +552,7 @@ function loadApiRuntimeConfig(): ApiRuntimeConfig | undefined {
   const loginRateLimitPerMinute = parsePositiveIntegerOrDefault(envTrimmed('API_AUTH_LOGIN_RATE_LIMIT_PER_MIN'), 20, 1, 1_000);
   const adminRoles = splitToSet(envTrimmed('API_ADMIN_ROLES'), 'admin');
   const adminScopes = splitToSet(envTrimmed('API_ADMIN_SCOPES'), 'admin');
-  const credentials = loadApiCredentials(adminRoles, adminScopes);
+  const bootstrapCredentials = loadApiBootstrapCredentials(adminRoles, adminScopes);
 
   return {
     host,
@@ -559,7 +572,7 @@ function loadApiRuntimeConfig(): ApiRuntimeConfig | undefined {
     loginRateLimitPerMinute,
     adminRoles,
     adminScopes,
-    credentials,
+    bootstrapCredentials,
   };
 }
 
@@ -719,6 +732,77 @@ function issueAccessToken(credential: ApiAuthCredential, cfg: ApiRuntimeConfig):
     jwtid: randomUUID(),
   });
   return { accessToken, expiresInSec: cfg.jwtAccessTtlSec };
+}
+
+function claimsFromBodyValue(value: unknown): Set<string> {
+  return parseClaimSet(value);
+}
+
+function boolFromBodyValue(value: unknown, field: string): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  throw new ApiHttpError(400, 'bad_request', `Field '${field}' must be boolean`);
+}
+
+function credentialFromApiUser(user: ApiUserAccount): ApiAuthCredential {
+  return {
+    username: user.username,
+    subject: user.subject,
+    passwordHash: user.passwordHash,
+    roles: new Set(user.roles),
+    scopes: new Set(user.scopes),
+  };
+}
+
+function publicApiUser(user: ApiUserAccount): Record<string, unknown> {
+  return {
+    id: user.id,
+    username: user.username,
+    subject: user.subject,
+    roles: Array.from(user.roles),
+    scopes: Array.from(user.scopes),
+    isActive: user.isActive,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+    lastLoginAt: user.lastLoginAt ?? null,
+  };
+}
+
+async function resolveLoginCredential(username: string, cfg: ApiRuntimeConfig): Promise<ResolvedLoginCredential | undefined> {
+  const normalized = apiUsernameKey(username);
+  const dbUser = await getApiUserByUsername(normalized);
+  if (dbUser) {
+    if (!dbUser.isActive) return undefined;
+    return { credential: credentialFromApiUser(dbUser), dbUserId: dbUser.id };
+  }
+  const bootstrap = cfg.bootstrapCredentials.get(normalized);
+  if (!bootstrap) return undefined;
+  return { credential: bootstrap };
+}
+
+async function seedBootstrapApiUsers(cfg: ApiRuntimeConfig): Promise<void> {
+  if (cfg.bootstrapCredentials.size === 0) return;
+  let seeded = 0;
+  for (const credential of cfg.bootstrapCredentials.values()) {
+    const before = await getApiUserByUsername(credential.username);
+    if (before) continue;
+    await upsertApiUserIfMissing({
+      username: credential.username,
+      subject: credential.subject,
+      passwordHash: credential.passwordHash,
+      roles: new Set(credential.roles),
+      scopes: new Set(credential.scopes),
+      isActive: true,
+    });
+    seeded += 1;
+  }
+  if (seeded > 0) {
+    console.log(`Seeded ${seeded} API auth user(s) from environment bootstrap`);
+  }
 }
 
 async function readJsonBody(req: IncomingMessage, maxBodyBytes: number): Promise<Record<string, unknown>> {
@@ -1025,25 +1109,30 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
       const body = await readJsonBody(req, cfg.maxBodyBytes);
       const username = bodyString(body, 'username');
       const password = bodyString(body, 'password');
-      const credential = cfg.credentials.get(normalizeCredentialUsername(username));
-      if (!credential) {
+      const resolvedCredential = await resolveLoginCredential(username, cfg);
+      if (!resolvedCredential) {
         throw new ApiHttpError(401, 'unauthorized', 'Invalid username or password');
       }
-      const ok = await bcrypt.compare(password, credential.passwordHash);
+      const ok = await bcrypt.compare(password, resolvedCredential.credential.passwordHash);
       if (!ok) {
         throw new ApiHttpError(401, 'unauthorized', 'Invalid username or password');
       }
-      const token = issueAccessToken(credential, cfg);
+      const token = issueAccessToken(resolvedCredential.credential, cfg);
+      if (resolvedCredential.dbUserId) {
+        await touchApiUserLastLogin(resolvedCredential.dbUserId).catch((err) =>
+          console.error('failed to update api user last login', err)
+        );
+      }
       sendApiJson(res, 200, {
         ok: true,
         tokenType: 'Bearer',
         accessToken: token.accessToken,
         expiresInSec: token.expiresInSec,
         expiresAt: Date.now() + token.expiresInSec * 1000,
-        subject: credential.subject,
-        username: credential.username,
-        roles: Array.from(credential.roles),
-        scopes: Array.from(credential.scopes),
+        subject: resolvedCredential.credential.subject,
+        username: resolvedCredential.credential.username,
+        roles: Array.from(resolvedCredential.credential.roles),
+        scopes: Array.from(resolvedCredential.credential.scopes),
       });
       return;
     }
@@ -1051,6 +1140,84 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
     const auth = parseApiAuth(req, cfg);
     const ip = requestIp(req, cfg);
     enforceApiRateLimit(auth, ip, cfg);
+
+    if (method === 'GET' && routePath === '/auth/users') {
+      requireAdmin(auth);
+      const users = await listApiUsers();
+      sendApiJson(res, 200, {
+        ok: true,
+        users: users.map((u) => publicApiUser(u)),
+      });
+      return;
+    }
+
+    if (method === 'POST' && routePath === '/auth/users') {
+      requireAdmin(auth);
+      const body = await readJsonBody(req, cfg.maxBodyBytes);
+      const username = bodyString(body, 'username');
+      const password = bodyString(body, 'password');
+      if (password.length < 8) {
+        throw new ApiHttpError(400, 'validation_error', 'Password must be at least 8 characters');
+      }
+      const subject = body.subject === undefined ? username : bodyString(body, 'subject');
+      const roles = body.roles === undefined ? new Set<string>(['user']) : claimsFromBodyValue(body.roles);
+      const scopes = body.scopes === undefined ? new Set<string>() : claimsFromBodyValue(body.scopes);
+      const isActive = body.isActive === undefined ? true : boolFromBodyValue(body.isActive, 'isActive');
+      const passwordHash = await bcrypt.hash(password, 12);
+      try {
+        const created = await createApiUser({
+          username,
+          subject,
+          passwordHash,
+          roles,
+          scopes,
+          isActive,
+        });
+        sendApiJson(res, 201, { ok: true, user: publicApiUser(created) });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message.toLowerCase() : '';
+        if (msg.includes('unique') || msg.includes('constraint') || msg.includes('duplicate')) {
+          throw new ApiHttpError(409, 'conflict', `API user '${apiUsernameKey(username)}' already exists`);
+        }
+        throw err;
+      }
+      return;
+    }
+
+    const authUserRoute = routePath.startsWith('/auth/users/') ? decodeURIComponent(routePath.slice('/auth/users/'.length)) : undefined;
+    if (method === 'PATCH' && authUserRoute !== undefined) {
+      requireAdmin(auth);
+      if (!authUserRoute || authUserRoute.includes('/')) {
+        throw new ApiHttpError(404, 'not_found', 'Route not found');
+      }
+      const body = await readJsonBody(req, cfg.maxBodyBytes);
+      const updatePayload: {
+        subject?: string;
+        passwordHash?: string;
+        roles?: Set<string>;
+        scopes?: Set<string>;
+        isActive?: boolean;
+      } = {};
+      if (body.subject !== undefined) updatePayload.subject = bodyString(body, 'subject');
+      if (body.password !== undefined) {
+        const password = bodyString(body, 'password');
+        if (password.length < 8) {
+          throw new ApiHttpError(400, 'validation_error', 'Password must be at least 8 characters');
+        }
+        updatePayload.passwordHash = await bcrypt.hash(password, 12);
+      }
+      if (body.roles !== undefined) updatePayload.roles = claimsFromBodyValue(body.roles);
+      if (body.scopes !== undefined) updatePayload.scopes = claimsFromBodyValue(body.scopes);
+      if (body.isActive !== undefined) updatePayload.isActive = boolFromBodyValue(body.isActive, 'isActive');
+      if (Object.keys(updatePayload).length === 0) {
+        throw new ApiHttpError(400, 'bad_request', 'No updatable fields supplied');
+      }
+
+      const updated = await updateApiUser(authUserRoute, updatePayload);
+      if (!updated) throw new ApiHttpError(404, 'not_found', `API user '${apiUsernameKey(authUserRoute)}' not found`);
+      sendApiJson(res, 200, { ok: true, user: publicApiUser(updated) });
+      return;
+    }
 
     if (method === 'POST' && routePath === '/quote') {
       const body = await readJsonBody(req, cfg.maxBodyBytes);
@@ -1344,12 +1511,13 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
   }
 }
 
-function startRestApiServer(): void {
+async function startRestApiServer(): Promise<void> {
   const cfg = loadApiRuntimeConfig();
   if (!cfg) {
     console.log('REST API disabled (REST_API_ENABLED=false)');
     return;
   }
+  await seedBootstrapApiUsers(cfg);
 
   const server = createServer((req, res) => {
     void handleApiRequest(req, res, cfg);
@@ -1843,7 +2011,7 @@ async function handleFinanceSummary(interaction: ChatInputCommandInteraction) {
 async function start() {
   await ensureDbReady();
   console.log(`Database backend: ${dbBackend()}`);
-  startRestApiServer();
+  await startRestApiServer();
   await registerCommands();
   await client.login(token);
   await restoreOrderExpirySchedules();

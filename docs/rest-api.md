@@ -14,6 +14,9 @@ This document describes the REST API exposed by the DHR bot and provides ready-t
 
 Access token validity is controlled by `API_JWT_ACCESS_TTL_SEC` (default: `1800` = 30 minutes).
 
+API users are stored in database table `api_users`.  
+`API_AUTH_*` env credentials are optional bootstrap seeds imported at startup.
+
 ## 2) Quick Variables
 
 ```bash
@@ -136,7 +139,50 @@ ADMIN_LOGIN_RESPONSE=$(curl -s "$BASE_URL/auth/login" \
 export ADMIN_TOKEN=$(echo "$ADMIN_LOGIN_RESPONSE" | jq -r '.accessToken')
 ```
 
-## 6.1 Mark Paid (Manual Fulfillment Trigger)
+## 6.1 List API Users
+
+`GET /auth/users`
+
+```bash
+curl -s "$BASE_URL/auth/users" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+## 6.2 Create API User
+
+`POST /auth/users`
+
+```bash
+curl -s -X POST "$BASE_URL/auth/users" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "vendor2",
+    "password": "Vendor2StrongPass!",
+    "subject": "vendor2",
+    "roles": ["user"],
+    "scopes": ["orders:read","orders:write"],
+    "isActive": true
+  }'
+```
+
+## 6.3 Update API User (roles/password/status)
+
+`PATCH /auth/users/:username`
+
+```bash
+curl -s -X PATCH "$BASE_URL/auth/users/vendor2" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "roles": ["admin"],
+    "scopes": ["admin"],
+    "password": "NewVendor2StrongPass!",
+    "isActive": true
+  }'
+```
+
+## 6.4 Mark Paid (Manual Fulfillment Trigger)
 
 `POST /orders/:id/mark_paid`
 
@@ -145,7 +191,7 @@ curl -s -X POST "$BASE_URL/orders/$ORDER_ID/mark_paid" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-## 6.2 Verify Payments
+## 6.5 Verify Payments
 
 `POST /payments/verify`
 
@@ -154,7 +200,7 @@ curl -s -X POST "$BASE_URL/payments/verify" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-## 6.3 Verify Payments Debug
+## 6.6 Verify Payments Debug
 
 `POST /payments/verify_debug`
 
@@ -165,7 +211,7 @@ curl -s -X POST "$BASE_URL/payments/verify_debug" \
   -d '{"limit":10}'
 ```
 
-## 6.4 Finance Summary
+## 6.7 Finance Summary
 
 `GET /finance/summary`
 
@@ -199,4 +245,5 @@ Common `error` values:
 - Run API behind HTTPS (reverse proxy or load balancer).
 - Keep JWT keys/secrets in secure secret storage.
 - Use strong bcrypt password hashes for `API_AUTH_*` credentials.
+- Use admin endpoints to manage users/roles instead of editing `.env`.
 - Rotate credentials and keys regularly.

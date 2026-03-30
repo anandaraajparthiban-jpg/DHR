@@ -12,6 +12,7 @@
 - Auto-start after payment: confirmed payments can auto-activate orders (`AUTO_ACTIVATE_ON_PAYMENT=true`).
 - Timed termination + notifications: active orders are auto-terminated on expiry and users are DM-notified on start/end.
 - Optional REST API with JWT auth mirrors bot flows for third-party integrations.
+- API auth users can be stored in DB and managed live (no `.env` edits needed for role changes).
 - Pool management: NiceHash pool create/reuse helper (cached by host/port/user); allowlist + regex validation for pools.
 - Comments added across core files for handoff (index.ts, pricing.ts, balances.ts, orders.ts, nh.ts, nhOrder.ts, braiins.ts, pool.ts).
 
@@ -51,6 +52,7 @@ Security controls:
 - admin routes require role/scope (`API_ADMIN_ROLES`, `API_ADMIN_SCOPES`)
 - per-user/IP API rate limiting (`API_RATE_LIMIT_PER_MIN`)
 - login attempt rate limiting (`API_AUTH_LOGIN_RATE_LIMIT_PER_MIN`)
+- API users are read from DB at login; env credentials are optional bootstrap seeds
 
 Generate bcrypt password hash:
 ```bash
@@ -76,6 +78,9 @@ Base path default: `/api/v1`
 Routes:
 - `GET /health`
 - `POST /auth/login` (username/password -> JWT)
+- `GET /auth/users` (admin, list API users)
+- `POST /auth/users` (admin, create API user)
+- `PATCH /auth/users/:username` (admin, update API user password/roles/scopes/active flag)
 - `POST /quote`
 - `POST /rent`
 - `GET /orders/:id`
@@ -93,7 +98,7 @@ Routes:
    - Discord: `DISCORD_TOKEN`, `DISCORD_APP_ID`, `DISCORD_PUBLIC_KEY`
    - REST API (optional): `REST_API_ENABLED`, `REST_API_HOST`, `REST_API_PORT`, `REST_API_BASE_PATH`
    - JWT auth for REST API: `API_JWT_ALGORITHM`, `API_JWT_SECRET` or (`API_JWT_PUBLIC_KEY` + `API_JWT_PRIVATE_KEY`), `API_JWT_ISSUER`, `API_JWT_AUDIENCE`, `API_JWT_ACCESS_TTL_SEC`, `API_JWT_REQUIRE_JTI`, `API_JWT_CLOCK_TOLERANCE_SEC`, `API_ADMIN_ROLES`, `API_ADMIN_SCOPES`, `API_RATE_LIMIT_PER_MIN`
-   - REST login credentials: `API_AUTH_CREDENTIALS_JSON` (recommended) or `API_AUTH_USERNAME` + `API_AUTH_PASSWORD_HASH`; optional `API_AUTH_LOGIN_RATE_LIMIT_PER_MIN`
+   - REST login bootstrap credentials (optional): `API_AUTH_CREDENTIALS_JSON` or `API_AUTH_USERNAME` + `API_AUTH_PASSWORD_HASH`; optional `API_AUTH_LOGIN_RATE_LIMIT_PER_MIN`
    - Database:
      - SQLite (default): `DB_BACKEND=sqlite`
      - Postgres: set `DB_BACKEND=postgres` and `DATABASE_URL` (optional TLS flags: `PGSSL=true` or `PGSSLMODE=require`)

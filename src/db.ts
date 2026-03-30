@@ -208,6 +208,19 @@ const migrations = [
     "createdAt" BIGINT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_payment_matches_order_id ON payment_matches("orderId")`,
+  `CREATE TABLE IF NOT EXISTS api_users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    subject TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    roles TEXT NOT NULL,
+    scopes TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    last_login_at BIGINT
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_api_users_username ON api_users(username)`,
 ];
 
 const orderUpgradeCols: Array<[string, string]> = [
@@ -219,6 +232,17 @@ const orderUpgradeCols: Array<[string, string]> = [
   ['expiresAt', 'BIGINT'],
   ['requestedProvider', 'TEXT'],
   ['fulfillmentProvider', 'TEXT'],
+];
+
+const apiUserUpgradeCols: Array<[string, string]> = [
+  ['subject', 'TEXT'],
+  ['password_hash', 'TEXT'],
+  ['roles', 'TEXT'],
+  ['scopes', 'TEXT'],
+  ['is_active', 'INTEGER NOT NULL DEFAULT 1'],
+  ['created_at', 'BIGINT'],
+  ['updated_at', 'BIGINT'],
+  ['last_login_at', 'BIGINT'],
 ];
 
 async function addColumnIfMissing(executor: DbExecutor, table: string, column: string, type: string): Promise<void> {
@@ -274,6 +298,9 @@ async function initSqlite(): Promise<DbAdapter> {
     await addColumnIfMissing(adapter, 'orders', column, type);
   }
   await addColumnIfMissing(adapter, 'payment_intents', 'bumpMicros', 'INTEGER NOT NULL DEFAULT 0');
+  for (const [column, type] of apiUserUpgradeCols) {
+    await addColumnIfMissing(adapter, 'api_users', column, type);
+  }
 
   await normalizePendingIntentBumps(adapter);
   await adapter.run(
@@ -302,6 +329,9 @@ async function initPostgres(): Promise<DbAdapter> {
     await addColumnIfMissing(adapter, 'orders', column, type);
   }
   await addColumnIfMissing(adapter, 'payment_intents', 'bumpMicros', 'INTEGER NOT NULL DEFAULT 0');
+  for (const [column, type] of apiUserUpgradeCols) {
+    await addColumnIfMissing(adapter, 'api_users', column, type);
+  }
 
   await normalizePendingIntentBumps(adapter);
   await adapter.run(
