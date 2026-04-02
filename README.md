@@ -102,7 +102,7 @@ Routes:
    - Database:
      - SQLite (default): `DB_BACKEND=sqlite`
      - Postgres: set `DB_BACKEND=postgres` and `DATABASE_URL` (optional TLS flags: `PGSSL=true` or `PGSSLMODE=require`)
-   - NiceHash: `NICEHASH_API_KEY`, `NICEHASH_API_SECRET`, `NICEHASH_ORG_ID`; optional `NICEHASH_API_BASE`, `NICEHASH_BAL_OVERRIDE_BTC`, `NICEHASH_GATE_ENABLED`, `NICEHASH_ORDER_MODE` (`standard` or `business_fixed_speed`), optional `NICEHASH_BUSINESS_BOTTOM_LIMIT_EH` for business mode
+   - NiceHash: `NICEHASH_API_KEY`, `NICEHASH_API_SECRET`, `NICEHASH_ORG_ID`; optional `NICEHASH_API_BASE`, `NICEHASH_BAL_OVERRIDE_BTC`, `NICEHASH_GATE_ENABLED`, `NICEHASH_ORDER_MODE` (`standard`, `business_fixed_speed`, or `business_fixed_duration`), optional `NICEHASH_BUSINESS_BOTTOM_LIMIT_EH` for business modes, optional `NICEHASH_BUSINESS_DURATION_SUBTYPE` (default first try `BUSINESS_FIXED_DURATION`, fallback `BUSINESS_FIXED_SPEED`), optional `NICEHASH_BUSINESS_DURATION_MIN_END_SEC` (minimum duration end window, default `900`)
    - Braiins: `BRAIINS_OWNER_TOKEN` or `BRAIINS_READONLY_TOKEN` (spot), optional `BRAIINS_BASE`
    - Payments: `PAYMENT_USDC_BASE` (Base recipient wallet, `0x...`), `PAYMENT_USDC_SOL` (Solana wallet or USDC token account), `PAYMENT_BTC_ONCHAIN`, `PAYMENT_VERIFY_INTERVAL_SEC`, `PAYMENT_BTC_SAT_TOLERANCE`, `PAYMENT_ACCEPT_UNCONFIRMED`, `PAYMENT_MAX_BACK_SKEW_SEC`, `REQUIRE_PAYMENT_CONFIRMATION_FOR_MARK_PAID`, `AUTO_ACTIVATE_ON_PAYMENT`
    - USDC Base verify: `BASE_RPC_URL`, `USDC_BASE_TOKEN` (Base USDC token contract, not your wallet), `PAYMENT_BASE_SCAN_BLOCKS`, `PAYMENT_BASE_MAX_SCAN_BLOCKS`, `PAYMENT_USDC_BASE_TOLERANCE_UNITS`
@@ -112,6 +112,10 @@ Routes:
    - Pricing: `PRICE_MARGIN_BPS`, `BETA_BUFFER_BPS`, `NICEHASH_FEE_BPS`, `BRAIINS_FEE_BPS`, `FLOOR_USD_PER_PH_DAY`, optional `INTERNAL_CAPACITY_USD_PER_PH_DAY`
    - Gates/Caps: `MIN_PH`, `MAX_PH`, `MIN_HOURS`, `MAX_HOURS`, `ADMIN_USER_IDS`, `ALLOWED_POOLS`
 3) Run: `npm run dev` (dev) or `npm run build && npm start` (prod)
+
+NiceHash dry-run payload preview (no order placement):
+- `npm run nh:dry-run -- --ph 25 --hours 30 --pool stratum+tcp://pool.example.com:3333 --worker bc1q...`
+- Add `--resolve-pool-id` if you want the script to create/resolve an actual NiceHash `poolId` instead of using a placeholder.
 
 Production step-by-step guide: `docs/production-install.md`
 Production go-live gate: `docs/production-go-live-checklist.md`

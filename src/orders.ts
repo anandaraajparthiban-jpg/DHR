@@ -32,6 +32,7 @@ export interface Order {
   nhOrderType?: string;
   nhSubType?: string;
   nhBottomLimit?: number;
+  nhEndTs?: string;
   nhMarketFactor?: string;
   nhPriceFactor?: string;
   expiresAt?: number;
@@ -130,12 +131,13 @@ export async function saveNhInfo(
     nhOrderType?: string;
     nhSubType?: string;
     nhBottomLimit?: number;
+    nhEndTs?: string;
     nhMarketFactor?: string;
     nhPriceFactor?: string;
   }
 ): Promise<void> {
   await dbRun(
-    'UPDATE orders SET "nhOrderId"=?, "nhMarket"=?, "nhPrice"=?, "nhLimit"=?, "nhAmount"=?, "nhOrderType"=?, "nhSubType"=?, "nhBottomLimit"=?, "nhMarketFactor"=?, "nhPriceFactor"=? WHERE id=?',
+    'UPDATE orders SET "nhOrderId"=?, "nhMarket"=?, "nhPrice"=?, "nhLimit"=?, "nhAmount"=?, "nhOrderType"=?, "nhSubType"=?, "nhBottomLimit"=?, "nhEndTs"=?, "nhMarketFactor"=?, "nhPriceFactor"=? WHERE id=?',
     [
       info.nhOrderId,
       info.nhMarket,
@@ -145,6 +147,7 @@ export async function saveNhInfo(
       info.nhOrderType ?? null,
       info.nhSubType ?? null,
       info.nhBottomLimit ?? null,
+      info.nhEndTs ?? null,
       info.nhMarketFactor ?? null,
       info.nhPriceFactor ?? null,
       id,

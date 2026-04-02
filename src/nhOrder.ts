@@ -4,7 +4,7 @@ import { btcUsd } from './pricing.js';
 import { getNhBuyInfo, getNhBestMarketPrice, buildNhOrderParams, getNhAlgorithmInfo } from './nh.js';
 import { nhPrivateRequest } from './nhHttp.js';
 
-export type NhOrderMode = 'standard' | 'business_fixed_speed';
+export type NhOrderMode = 'standard' | 'business_fixed_speed' | 'business_fixed_duration';
 
 export interface NhOrderResult {
   id: string;
@@ -16,8 +16,31 @@ export interface NhOrderResult {
   orderType: 'standard' | 'business';
   subType?: string;
   bottomLimit?: number;
+  endTs?: string;
   marketFactor?: string;
   priceFactor?: string;
+}
+
+export interface NhOrderRequestCandidate {
+  endpoint: string;
+  payload: Record<string, unknown>;
+  subType?: string;
+}
+
+export interface NhOrderPlacementPlan {
+  mode: NhOrderMode;
+  orderType: 'standard' | 'business';
+  market: string;
+  price: number;
+  limit: number;
+  amount: number;
+  poolId: string;
+  poolIdResolved: boolean;
+  marketFactor?: string;
+  priceFactor?: string;
+  bottomLimit?: number;
+  endTs?: string;
+  requestCandidates: NhOrderRequestCandidate[];
 }
 
 export interface NhOrderInput {
@@ -26,6 +49,11 @@ export interface NhOrderInput {
   poolUrl: string;
   worker: string;
   usdPerPhDay: number;
+}
+
+interface BuildNhOrderPlanOptions {
+  resolvePoolId: boolean;
+  poolIdPlaceholder?: string;
 }
 
 interface NhOrderEconomics {
@@ -41,7 +69,19 @@ interface NhOrderEconomics {
 export function resolveNhOrderMode(): NhOrderMode {
   const raw = (process.env.NICEHASH_ORDER_MODE ?? 'standard').trim().toLowerCase();
   if (raw === 'business_fixed_speed') return 'business_fixed_speed';
+  if (raw === 'business_fixed_duration') return 'business_fixed_duration';
   return 'standard';
+}
+
+function resolveBusinessDurationSubtypePreference(): string {
+  const raw = (process.env.NICEHASH_BUSINESS_DURATION_SUBTYPE ?? 'BUSINESS_FIXED_DURATION').trim().toUpperCase();
+  return raw || 'BUSINESS_FIXED_DURATION';
+}
+
+function resolveBusinessDurationMinEndSec(): number {
+  const raw = Number(process.env.NICEHASH_BUSINESS_DURATION_MIN_END_SEC ?? '900');
+  if (!isFinite(raw) || raw <= 0) return 900;
+  return Math.max(60, Math.floor(raw));
 }
 
 async function resolveNhOrderEconomics(opts: Pick<NhOrderInput, 'ph' | 'hours' | 'usdPerPhDay'>): Promise<NhOrderEconomics> {
@@ -104,6 +144,42 @@ function validateBusinessOrderLimits(limit: number, amount: number, algoInfo: Aw
   }
 }
 
+function validateBusinessBottomLimit(bottomLimit: number, limit: number, algoInfo: Awaited<ReturnType<typeof getNhAlgorithmInfo>>) {
+  if (!isFinite(bottomLimit) || bottomLimit <= 0) {
+    throw new Error(`Business order bottomLimit must be > 0. Received ${bottomLimit}.`);
+  }
+  if (bottomLimit > limit) {
+    throw new Error(`Business order bottomLimit ${bottomLimit} cannot exceed limit ${limit}.`);
+  }
+  const minSpeedLimit = Number(algoInfo.minSpeedLimit);
+  if (isFinite(minSpeedLimit) && minSpeedLimit > 0 && bottomLimit < minSpeedLimit) {
+    throw new Error(`Business order bottomLimit ${bottomLimit} is below minSpeedLimit ${minSpeedLimit}.`);
+  }
+}
+
+function validateBusinessDurationGuardrails(hours: number): void {
+  if (!isFinite(hours) || hours <= 0) throw new Error(`Business duration mode requires hours > 0. Received ${hours}.`);
+  const requestedSec = hours * 3600;
+  const minEndSec = resolveBusinessDurationMinEndSec();
+  if (requestedSec < minEndSec) {
+    throw new Error(
+      `Business duration order end window ${requestedSec}s is below minimum ${minEndSec}s (NICEHASH_BUSINESS_DURATION_MIN_END_SEC).`
+    );
+  }
+}
+
+function isDurationSubtypeFallbackCandidateError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    message.includes('http 400') &&
+    (lower.includes('subtype') ||
+      lower.includes('business_fixed_duration') ||
+      lower.includes('enum') ||
+      lower.includes('invalid request') ||
+      lower.includes('validation'))
+  );
+}
+
 async function resolveNhOrderDraft(
   opts: NhOrderInput,
   orderMode: NhOrderMode
@@ -116,8 +192,11 @@ async function resolveNhOrderDraft(
   if (!host || !port) throw new Error('Invalid pool URL');
 
   const economics = await resolveNhOrderEconomics(opts);
-  if (orderMode === 'business_fixed_speed') {
+  if (orderMode === 'business_fixed_speed' || orderMode === 'business_fixed_duration') {
     validateBusinessOrderLimits(economics.limit, economics.amount, economics.algoInfo);
+    if (orderMode === 'business_fixed_duration') {
+      validateBusinessDurationGuardrails(opts.hours);
+    }
   }
   return { host, port, ...economics };
 }
@@ -128,26 +207,31 @@ export async function ensureNhOrderSatisfiesMinimum(opts: NhOrderInput): Promise
 
 export async function ensureNhQuotedOrderSatisfiesMinimum(opts: Pick<NhOrderInput, 'ph' | 'hours' | 'usdPerPhDay'>): Promise<void> {
   const economics = await resolveNhOrderEconomics(opts);
-  if (resolveNhOrderMode() === 'business_fixed_speed') {
+  const orderMode = resolveNhOrderMode();
+  if (orderMode === 'business_fixed_speed' || orderMode === 'business_fixed_duration') {
     validateBusinessOrderLimits(economics.limit, economics.amount, economics.algoInfo);
+    if (orderMode === 'business_fixed_duration') {
+      validateBusinessDurationGuardrails(opts.hours);
+    }
   }
 }
 
-export async function createNhOrder(opts: NhOrderInput): Promise<NhOrderResult> {
+async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrderPlanOptions): Promise<NhOrderPlacementPlan> {
   const orderMode = resolveNhOrderMode();
   const { worker } = opts;
   const { host, port, market, price: finalPrice, limit, amount, buyInfo, best, algoInfo } = await resolveNhOrderDraft(opts, orderMode);
 
   const marketInfo = buyInfo.markets.find((m) => m.market === market || m.market.toUpperCase().startsWith(market.toUpperCase()));
-
-  const poolId = await ensurePool({
-    algorithm: 'SHA256ASICBOOST',
-    host,
-    port,
-    username: worker,
-    password: 'x',
-    name: `auto-${worker}-${host}`,
-  });
+  const poolId = options.resolvePoolId
+    ? await ensurePool({
+        algorithm: 'SHA256ASICBOOST',
+        host,
+        port,
+        username: worker,
+        password: 'x',
+        name: `auto-${worker}-${host}`,
+      })
+    : (options.poolIdPlaceholder?.trim() || '<resolved_at_order_time>');
 
   const displayMarketFactor = algoInfo.displayMarketFactor || marketInfo?.displayMarketFactor || best.displayMarketFactor || 'EH';
   const displayPriceFactor = algoInfo.displayPriceFactor || marketInfo?.displayPriceFactor || best.displayPriceFactor || 'EH';
@@ -158,41 +242,45 @@ export async function createNhOrder(opts: NhOrderInput): Promise<NhOrderResult> 
     normalizeFactor(String(algoInfo.raw?.priceFactor ?? ''), algoInfo.priceFactor) ??
     normalizeFactor(best.priceFactorRaw, marketInfo?.priceFactor ?? best.priceFactor);
 
-  let data: any;
-  let payload: any;
   let endpoint = '/main/api/v2/hashpower/order';
   let orderType: 'standard' | 'business' = 'standard';
-  let subType: string | undefined;
+  let payload: Record<string, unknown>;
   let bottomLimit: number | undefined;
-  if (orderMode === 'business_fixed_speed') {
+  let endTs: string | undefined;
+  if (orderMode === 'business_fixed_speed' || orderMode === 'business_fixed_duration') {
     endpoint = '/main/api/v2/hashpower/business/order';
     orderType = 'business';
-    subType = 'BUSINESS_FIXED_SPEED';
+    const envBottomLimit = Number(process.env.NICEHASH_BUSINESS_BOTTOM_LIMIT_EH ?? NaN);
+    const minSpeedLimit = Number(algoInfo.minSpeedLimit);
+    if (orderMode === 'business_fixed_duration') {
+      const endMs = Date.now() + opts.hours * 3600 * 1000;
+      endTs = new Date(endMs).toISOString();
+      bottomLimit =
+        isFinite(envBottomLimit) && envBottomLimit > 0
+          ? envBottomLimit
+          : isFinite(minSpeedLimit) && minSpeedLimit > 0
+            ? minSpeedLimit
+            : limit;
+      validateBusinessBottomLimit(bottomLimit, limit, algoInfo);
+    } else if (isFinite(envBottomLimit) && envBottomLimit > 0) {
+      bottomLimit = envBottomLimit;
+      validateBusinessBottomLimit(bottomLimit, limit, algoInfo);
+    }
     payload = {
       market,
       algorithm: 'SHA256ASICBOOST',
       amount,
       limit,
       poolId,
-      subType,
       displayMarketFactor,
       displayPriceFactor,
     };
-    const envBottomLimit = Number(process.env.NICEHASH_BUSINESS_BOTTOM_LIMIT_EH ?? NaN);
-    if (isFinite(envBottomLimit) && envBottomLimit > 0) {
-      if (envBottomLimit > limit) throw new Error(`Business order bottomLimit ${envBottomLimit} cannot exceed limit ${limit}.`);
-      const minSpeedLimit = Number(algoInfo.minSpeedLimit);
-      if (isFinite(minSpeedLimit) && minSpeedLimit > 0 && envBottomLimit < minSpeedLimit) {
-        throw new Error(`Business order bottomLimit ${envBottomLimit} is below minSpeedLimit ${minSpeedLimit}.`);
-      }
-      bottomLimit = envBottomLimit;
-      payload.bottomLimit = envBottomLimit;
-    }
+    if (typeof bottomLimit === 'number') payload.bottomLimit = bottomLimit;
+    if (endTs) payload.endTs = endTs;
   } else {
     payload = {
       market,
       algorithm: 'SHA256ASICBOOST',
-      // Keep numeric values quantized in nh.ts to satisfy NH data scale validators.
       price: finalPrice,
       limit,
       amount,
@@ -204,16 +292,188 @@ export async function createNhOrder(opts: NhOrderInput): Promise<NhOrderResult> 
   }
   if (marketFactor) payload.marketFactor = marketFactor;
   if (priceFactor) payload.priceFactor = priceFactor;
-  try {
-    data = await nhPrivateRequest('POST', endpoint, { body: payload });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`NH order create failed endpoint=${endpoint} payload=${JSON.stringify(payload)} cause=${msg}`);
+
+  const requestCandidates: NhOrderRequestCandidate[] =
+    orderType === 'business'
+      ? (orderMode === 'business_fixed_duration'
+          ? Array.from(new Set([resolveBusinessDurationSubtypePreference(), 'BUSINESS_FIXED_SPEED']))
+          : ['BUSINESS_FIXED_SPEED']
+        ).map((subType) => ({
+          endpoint,
+          subType,
+          payload: { ...payload, subType },
+        }))
+      : [
+          {
+            endpoint,
+            payload: { ...payload },
+          },
+        ];
+
+  return {
+    mode: orderMode,
+    orderType,
+    market,
+    price: finalPrice,
+    limit,
+    amount,
+    poolId,
+    poolIdResolved: options.resolvePoolId,
+    marketFactor,
+    priceFactor,
+    bottomLimit,
+    endTs,
+    requestCandidates,
+  };
+}
+
+export async function previewNhOrderPlacement(
+  opts: NhOrderInput,
+  options: { resolvePoolId?: boolean; poolIdPlaceholder?: string } = {}
+): Promise<NhOrderPlacementPlan> {
+  return buildNhOrderPlacementPlan(opts, {
+    resolvePoolId: options.resolvePoolId ?? false,
+    poolIdPlaceholder: options.poolIdPlaceholder,
+  });
+}
+
+function toFiniteNumberOrUndefined(value: unknown): number | undefined {
+  const n = Number(value);
+  return isFinite(n) ? n : undefined;
+}
+
+interface NhOrderSnapshot {
+  id: string;
+  market?: string;
+  amount?: number;
+  limit?: number;
+  price?: number;
+  subType?: string;
+  bottomLimit?: number;
+  endTs?: string;
+}
+
+function parseNhOrderSnapshot(data: any): NhOrderSnapshot | undefined {
+  const order = data?.order ?? data?.body?.order ?? data?.body ?? data;
+  const id = order?.id ?? order?.orderId;
+  if (!id) return undefined;
+  const parsed: NhOrderSnapshot = { id: String(id) };
+  if (typeof order?.market === 'string' && order.market.trim()) parsed.market = order.market;
+  const amount = toFiniteNumberOrUndefined(order?.amount);
+  if (amount !== undefined) parsed.amount = amount;
+  const limit = toFiniteNumberOrUndefined(order?.limit);
+  if (limit !== undefined) parsed.limit = limit;
+  const price = toFiniteNumberOrUndefined(order?.price);
+  if (price !== undefined) parsed.price = price;
+  if (typeof order?.subType === 'string' && order.subType.trim()) parsed.subType = order.subType;
+  const bottomLimit = toFiniteNumberOrUndefined(order?.bottomLimit);
+  if (bottomLimit !== undefined) parsed.bottomLimit = bottomLimit;
+  if (typeof order?.endTs === 'string' && order.endTs.trim()) parsed.endTs = order.endTs;
+  return parsed;
+}
+
+async function fetchNhOrderSnapshot(orderId: string): Promise<NhOrderSnapshot | undefined> {
+  const data = await nhPrivateRequest('GET', `/main/api/v2/hashpower/order/${encodeURIComponent(orderId)}`);
+  return parseNhOrderSnapshot(data);
+}
+
+function warnOrderMismatch(orderId: string, field: string, requested: string | number | undefined, actual: string | number | undefined): void {
+  if (requested === undefined || actual === undefined) return;
+  if (typeof requested === 'number' && typeof actual === 'number') {
+    if (Math.abs(requested - actual) <= 1e-10) return;
+  } else if (String(requested) === String(actual)) {
+    return;
+  }
+  console.warn(`NiceHash post-create verification mismatch order=${orderId} field=${field} requested=${requested} actual=${actual}`);
+}
+
+export async function createNhOrder(opts: NhOrderInput): Promise<NhOrderResult> {
+  const plan = await buildNhOrderPlacementPlan(opts, { resolvePoolId: true });
+  let data: any;
+  let lastErr: string | undefined;
+  let chosenSubType: string | undefined;
+  for (let i = 0; i < plan.requestCandidates.length; i++) {
+    const candidate = plan.requestCandidates[i];
+    try {
+      data = await nhPrivateRequest('POST', candidate.endpoint, { body: candidate.payload });
+      chosenSubType = candidate.subType;
+      break;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastErr = msg;
+      const canFallback =
+        plan.mode === 'business_fixed_duration' &&
+        i === 0 &&
+        candidate.subType === 'BUSINESS_FIXED_DURATION' &&
+        plan.requestCandidates[i + 1]?.subType === 'BUSINESS_FIXED_SPEED' &&
+        isDurationSubtypeFallbackCandidateError(msg);
+      if (!canFallback) {
+        throw new Error(`NH order create failed endpoint=${candidate.endpoint} payload=${JSON.stringify(candidate.payload)} cause=${msg}`);
+      }
+    }
+  }
+  if (!data) {
+    const first = plan.requestCandidates[0];
+    throw new Error(
+      `NH order create failed endpoint=${first?.endpoint ?? '/main/api/v2/hashpower/order'} payload=${JSON.stringify(first?.payload ?? {})} cause=${
+        lastErr ?? 'unknown error'
+      }`
+    );
   }
   const id = data?.id ?? data?.orderId;
   if (!id) throw new Error('order create missing id');
+  const orderId = String(id);
 
-  return { id: String(id), market, price: finalPrice, limit, amount, poolId, orderType, subType, bottomLimit, marketFactor, priceFactor };
+  let market = plan.market;
+  let amount = plan.amount;
+  let limit = plan.limit;
+  let price = plan.price;
+  let subType = typeof data?.subType === 'string' && data.subType.trim() ? data.subType : chosenSubType;
+  let bottomLimit = plan.bottomLimit;
+  let endTs = plan.endTs;
+  const dataBottomLimit = Number(data?.bottomLimit);
+  if (isFinite(dataBottomLimit) && dataBottomLimit > 0) bottomLimit = dataBottomLimit;
+  if (typeof data?.endTs === 'string' && data.endTs.trim()) endTs = data.endTs;
+  const dataAmount = Number(data?.amount);
+  if (isFinite(dataAmount) && dataAmount > 0) amount = dataAmount;
+  const dataLimit = Number(data?.limit);
+  if (isFinite(dataLimit) && dataLimit > 0) limit = dataLimit;
+  const dataPrice = Number(data?.price);
+  if (isFinite(dataPrice) && dataPrice > 0) price = dataPrice;
+
+  try {
+    const snapshot = await fetchNhOrderSnapshot(orderId);
+    if (snapshot) {
+      warnOrderMismatch(orderId, 'market', market, snapshot.market);
+      warnOrderMismatch(orderId, 'amount', amount, snapshot.amount);
+      warnOrderMismatch(orderId, 'limit', limit, snapshot.limit);
+      if (snapshot.market) market = snapshot.market;
+      if (snapshot.amount !== undefined) amount = snapshot.amount;
+      if (snapshot.limit !== undefined) limit = snapshot.limit;
+      if (snapshot.price !== undefined) price = snapshot.price;
+      if (snapshot.subType) subType = snapshot.subType;
+      if (snapshot.bottomLimit !== undefined) bottomLimit = snapshot.bottomLimit;
+      if (snapshot.endTs) endTs = snapshot.endTs;
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`NiceHash post-create verification failed order=${orderId} cause=${msg}`);
+  }
+
+  return {
+    id: orderId,
+    market,
+    price,
+    limit,
+    amount,
+    poolId: plan.poolId,
+    orderType: plan.orderType,
+    subType,
+    bottomLimit,
+    endTs,
+    marketFactor: plan.marketFactor,
+    priceFactor: plan.priceFactor,
+  };
 }
 
 export async function cancelNhOrder(orderId: string): Promise<void> {

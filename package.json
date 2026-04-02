@@ -7,7 +7,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "lint": "eslint . --ext .ts"
+    "lint": "eslint . --ext .ts",
+    "nh:dry-run": "tsx src/cli/nh-dry-run.ts"
   },
   "dependencies": {
     "@resvg/resvg-js": "^2.6.2",

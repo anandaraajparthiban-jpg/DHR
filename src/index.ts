@@ -1,5 +1,5 @@
 // index.ts — Discord bot main:
-// - Registers slash commands (/quote, /rent, /status, /time_left, /cancel, /payment_status, /mark_paid, /verify_payments, /verify_payments_debug, /finance_summary).
+// - Registers slash commands (/quote, /rent, /status, /time_left, /cancel, /payment_status, /mark_paid, /verify_payments, /verify_payments_debug, /nh_payload_preview, /finance_summary).
 // - /rent collects pool + worker, creates payment intent, and waits for payment.
 // - On payment confirmation, orders can auto-activate; admin can still trigger /mark_paid manually.
 // - Fulfillment uses NiceHash only.
@@ -25,7 +25,7 @@ import {
 } from './orders.js';
 import { validatePool } from './pools.js';
 import { nicehashBalanceUsd } from './balances.js';
-import { createNhOrder, cancelNhOrder, ensureNhOrderSatisfiesMinimum, ensureNhQuotedOrderSatisfiesMinimum } from './nhOrder.js';
+import { createNhOrder, cancelNhOrder, ensureNhOrderSatisfiesMinimum, ensureNhQuotedOrderSatisfiesMinimum, previewNhOrderPlacement } from './nhOrder.js';
 import { ensurePaymentIntent, getPaymentIntentByOrder } from './payments.js';
 import { runPaymentVerificationTick, runPaymentVerificationDebug, startPaymentVerificationLoop } from './paymentVerifier.js';
 import {
@@ -172,6 +172,16 @@ const commands = [
         .setRequired(false)
         .setMinValue(1)
         .setMaxValue(20)
+    ),
+  new SlashCommandBuilder()
+    .setName('nh_payload_preview')
+    .setDescription('Admin: preview NiceHash payload without placing order')
+    .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
+    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72))
+    .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL').setRequired(true))
+    .addStringOption((opt) => opt.setName('worker').setDescription('BTC address only (no suffix)').setRequired(true))
+    .addBooleanOption((opt) =>
+      opt.setName('resolve_pool_id').setDescription('If true, resolve/create actual NiceHash poolId (side effect)')
     ),
   new SlashCommandBuilder().setName('finance_summary').setDescription('Admin: revenue vs NiceHash spend summary'),
 ];
@@ -1007,6 +1017,7 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
     nhOrderType: nh.orderType,
     nhSubType: nh.subType,
     nhBottomLimit: nh.bottomLimit,
+    nhEndTs: nh.endTs,
     nhMarketFactor: nh.marketFactor,
     nhPriceFactor: nh.priceFactor,
   });
@@ -1014,7 +1025,9 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
     nh.orderType === 'business'
       ? `NiceHash business order placed: ${nh.id} (market ${nh.market}, subtype ${nh.subType ?? 'BUSINESS_FIXED_SPEED'}, limit ${nh.limit.toFixed(
           6
-        )} EH/s${typeof nh.bottomLimit === 'number' ? `, bottomLimit ${nh.bottomLimit.toFixed(6)} EH/s` : ''}, amount ${nh.amount.toFixed(8)} BTC).`
+        )} EH/s${typeof nh.bottomLimit === 'number' ? `, bottomLimit ${nh.bottomLimit.toFixed(6)} EH/s` : ''}${
+          nh.endTs ? `, endTs ${nh.endTs}` : ''
+        }, amount ${nh.amount.toFixed(8)} BTC).`
       : `NiceHash order placed: ${nh.id} (market ${nh.market}, price ${nh.price.toFixed(8)} BTC/EH/day, limit ${nh.limit.toFixed(6)} EH/s).`;
 
   await updateExpiry(orderId, expiresAt);
@@ -1569,6 +1582,9 @@ client.on('interactionCreate', async (interaction) => {
       case 'verify_payments_debug':
         await handleVerifyPaymentsDebug(interaction);
         break;
+      case 'nh_payload_preview':
+        await handleNhPayloadPreview(interaction);
+        break;
       case 'finance_summary':
         await handleFinanceSummary(interaction);
         break;
@@ -1672,6 +1688,102 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
     }`
   );
   await interaction.reply({ content: lines.join('\n'), ephemeral: true });
+}
+
+async function handleNhPayloadPreview(interaction: ChatInputCommandInteraction) {
+  if (!isAdmin(interaction.user.id)) {
+    await interaction.reply({ content: 'Admins only.', ephemeral: true });
+    return;
+  }
+
+  const ph = interaction.options.getNumber('ph', true);
+  const hours = interaction.options.getInteger('hours', true);
+  const pool = interaction.options.getString('pool', true);
+  const worker = interaction.options.getString('worker', true);
+  const resolvePoolId = interaction.options.getBoolean('resolve_pool_id') ?? false;
+
+  if (!isValidWorkerName(worker)) {
+    await interaction.reply({
+      content: 'Worker must be a valid BTC mainnet address only (no suffix like `.worker`, no dots).',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const minPh = Number(process.env.MIN_PH ?? '0');
+  const maxPh = Number(process.env.MAX_PH ?? '0');
+  const minHours = Number(process.env.MIN_HOURS ?? '0');
+  const maxHours = Number(process.env.MAX_HOURS ?? '0');
+  if (minPh > 0 && ph < minPh) {
+    await interaction.reply({ content: `Minimum size is ${minPh} PH`, ephemeral: true });
+    return;
+  }
+  if (maxPh > 0 && ph > maxPh) {
+    await interaction.reply({ content: `Maximum size is ${maxPh} PH`, ephemeral: true });
+    return;
+  }
+  if (minHours > 0 && hours < minHours) {
+    await interaction.reply({ content: `Minimum duration is ${minHours} hours`, ephemeral: true });
+    return;
+  }
+  if (maxHours > 0 && hours > maxHours) {
+    await interaction.reply({ content: `Maximum duration is ${maxHours} hours`, ephemeral: true });
+    return;
+  }
+  if (hours > 72) {
+    await interaction.reply({ content: 'Maximum duration is 72 hours', ephemeral: true });
+    return;
+  }
+
+  const poolOk = validatePool(pool);
+  if (!poolOk.valid) {
+    await interaction.reply({ content: `Pool not allowed: ${poolOk.reason}`, ephemeral: true });
+    return;
+  }
+
+  try {
+    const routingQuote = await quoteHashrate({ ph, hours, pool, worker, preferredSource: 'nicehash' });
+    if (routingQuote.source !== 'nicehash') {
+      await interaction.reply({ content: 'NiceHash quote unavailable right now. Please retry shortly.', ephemeral: true });
+      return;
+    }
+    const plan = await previewNhOrderPlacement(
+      {
+        ph,
+        hours,
+        poolUrl: pool,
+        worker,
+        usdPerPhDay: routingQuote.baseUsdPerPhDay,
+      },
+      { resolvePoolId, poolIdPlaceholder: '<resolved_at_order_time>' }
+    );
+
+    const body = JSON.stringify(
+      {
+        mode: plan.mode,
+        orderType: plan.orderType,
+        market: plan.market,
+        limit: plan.limit,
+        amount: plan.amount,
+        poolId: plan.poolId,
+        poolIdResolved: plan.poolIdResolved,
+        bottomLimit: plan.bottomLimit,
+        endTs: plan.endTs,
+        requestCandidates: plan.requestCandidates,
+      },
+      null,
+      2
+    );
+    const prefix = resolvePoolId
+      ? 'Preview generated (poolId resolved/created).'
+      : 'Preview generated (poolId placeholder used; pass `resolve_pool_id=true` for exact poolId).';
+    const maxContent = 1800;
+    const payloadBlock = body.length > maxContent ? `${body.slice(0, maxContent)}\n...<truncated>` : body;
+    await interaction.reply({ content: `${prefix}\n\`\`\`json\n${payloadBlock}\n\`\`\``, ephemeral: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await interaction.reply({ content: `Preview failed: ${msg}`, ephemeral: true });
+  }
 }
 
 async function handleRent(interaction: ChatInputCommandInteraction) {

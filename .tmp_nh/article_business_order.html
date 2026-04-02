@@ -1,0 +1,153 @@
+<p>NiceHash <strong>Business Orders</strong> are designed for professional hashrate buyers who need <strong>stable, predictable hashrate delivery</strong> and more control than standard marketplace orders. For a business order, a verified organization (KYB) is required.</p>
+<p>There are two types of business orders:</p> 
+<ol>
+    <li><strong>Fixed Speed: </strong>Constant speed; completion time fluctuates based on the hash rate index price and available funds.</li>
+<li><strong>Fixed Duration:</strong> Reverse logic; speed adapts to a fixed end date, influenced by the hash rate index price and available funds.</li>
+</ol>
+
+<p>IMPORTANT: Changes are made every 15 minutes</p>
+<p><br></p>
+
+
+
+<h2>What Is a Business Order?</h2>
+<p>A Business Order is a managed hashrate package assembled from available sellers on the NiceHash marketplace. It allows you to purchase hashrate with:</p>
+<ul>
+    <li><strong>Priority Fixed Speed</strong> delivery (stable hashrate)</li>
+    <li><strong>Multiple algorithms</strong> (SHA256AsicBoost, Scrypt and KHeavyHash)</li>
+    <li><strong>Market selection</strong> (EU / USA)</li>
+    <li>Mining directly to your own <strong>pool</strong></li>
+    <li>Improved predictability for planning and operations</li>
+</ul>
+<p><br></p>
+
+<h2>Before You Start</h2>
+<p>To create a Business Order, make sure you have:</p>
+<ul>
+    <li>A configured <strong>mining pool</strong> in NiceHash (you will need the <strong>poolId</strong>)</li>
+    <li>Selected the correct <strong>algorithm</strong> (e.g., SHA256AsicBoost)</li>
+    <li>Chosen the target <strong>market</strong> (EU or USA)</li>
+    <li>Checked the current algorithm limits via API (recommended)</li>
+</ul>
+<p><br></p>
+
+<h2>Important: Check Algorithm Limits via API</h2>
+<p>Algorithm settings (limits, factors, enabled markets) can be retrieved from the official endpoint:</p>
+<p><strong>GET</strong> <code>/main/api/v2/mining/algorithms</code></p>
+<p>Use this endpoint to verify:</p>
+<ul>
+    <li><code>minimalOrderAmount</code> (minimum BTC amount)</li>
+    <li><code>minSpeedLimit</code> and <code>maxSpeedLimit</code> (valid speed range)</li>
+    <li><code>displayMarketFactor</code> and <code>marketFactor</code> (required units and scaling)</li>
+</ul>
+<p>Documentation (parameter details): <a href="https://www.nicehash.com/docs/rest/#!/algorithm-controller/getAlgorithms">MINING ALGORITHMS – GET /main/api/v2/mining/algorithms</a>.</p>
+<p><br></p>
+
+<h2>Option 1: Create a Business Order via the Interface (UI)</h2>
+<p>Use the NiceHash interface if you want a guided, manual setup.</p>
+<ol>
+    <li>Log in to NiceHash.</li>
+    <li>Navigate to <strong>Hashrate Marketplace → Business Orders</strong>.</li>
+    <li>Select your <strong>market</strong> (EU / USA).</li>
+    <li>Choose the <strong>algorithm</strong> (e.g., SHA256AsicBoost).</li>
+    <li>Select or add your <strong>mining pool</strong>.</li>
+    <li>Select the type of Business order</li>
+    <li>For a <strong>fixed speed</strong> set amount and the speed limit. For a&nbsp;<strong>fixed duration,&nbsp;</strong>set&nbsp; amount, bottom speed limit, and the end date.&nbsp;</li>
+    <li>Review and confirm the order.</li>
+</ol>
+<p><img src="https://static.nicehash.com/marketing%2Fbusiness_orders.png" alt="Business orders UI" width="780" height="224"><br></p>
+<p><br></p>
+
+<h2>Option 2: Create a Business Order with a fixed speed via API </h2>
+<p>The API method is recommended if you want:</p>
+<ul>
+    <li>Explicit selection of <strong>Fixed Speed</strong> (<code>subType</code>)</li>
+    <li>Precise speed configuration (including decimal precision above the minimum)</li>
+    <li>Automation, retries, scaling, and integration into internal tooling</li>
+</ul>
+<p>Reference implementation and HMAC signing examples are available here: <a href="https://github.com/nicehash/rest-clients-demo">NiceHash REST Clients Demo (GitHub)</a>.</p>
+<p><br></p>
+
+<h2>API Calls Used in a Typical Business Order Flow</h2>
+<p>These endpoints are commonly used when placing Business Orders programmatically:</p>
+<ul>
+    <li><strong>Read algorithm limits &amp; factors:</strong> <code>GET /main/api/v2/mining/algorithms</code></li>
+    <li><strong>List pools:</strong> <code>GET /main/api/v2/pool</code></li>
+    <li><strong>Create a pool (if needed):</strong> <code>POST /main/api/v2/pool</code></li>
+    <li><strong>Create a Business Order:</strong> <code>POST /main/api/v2/hashpower/business/order</code></li>
+    <li><strong>Monitor order status:</strong> <code>GET /main/api/v2/hashpower/order/&lt;orderId&gt;</code></li>
+</ul>
+<p><br></p>
+
+<h2>Fixed Speed Basics (SHA256AsicBoost Example)</h2>
+<p>For <strong>SHA256ASICBOOST</strong>, Business Orders use <strong>EH</strong> as the speed unit.</p>
+<p><strong>Minimum speed rule:</strong> your <code>limit</code> must be greater than or equal to the algorithm’s minimum (<code>minSpeedLimit</code> / derived minLimit). This is a <strong>minimum speed constraint</strong>, not a decimal precision limitation.</p>
+<p>Examples (values in EH):</p>
+<ul>
+    <li><code>0.0001</code> (minimum threshold example)</li>
+    <li><code>0.00011</code> (valid, higher than minimum)</li>
+    <li><code>0.0001234</code> (valid, more decimal precision)</li>
+</ul>
+<p><br></p>
+
+<h2>Example A: Small Fixed-Speed Business Order (1 PH Equivalent)</h2>
+<p>This example demonstrates a small, precise fixed speed using decimals. (Speed values are expressed in EH.)</p>
+<pre><code>{
+  "market": "EU",
+  "algorithm": "SHA256ASICBOOST",
+  "amount": 1,
+  "displayMarketFactor": "EH",
+  "marketFactor": 1000000000000000000,
+  "limit": 0.0001,
+  "displayPriceFactor": "EH",
+  "priceFactor": 1000000000000000000,
+  "poolId": "your_pool_id",
+  "subType": "BUSINESS_FIXED_SPEED"
+}</code></pre>
+<p><br></p>
+
+<h2>Example B: Fixed-Speed Business Order (25 PH for 30 Days)</h2>
+<p>To target <strong>25 PH</strong> on SHA256AsicBoost, convert to EH:</p>
+<ul>
+    <li><strong>1 PH = 0.001 EH</strong></li>
+    <li><strong>25 PH = 0.025 EH</strong></li>
+</ul>
+<p>Use a speed window that includes your target. For example:</p>
+<ul>
+    <li><code>bottomLimit = 0.02</code> (20 PH)</li>
+    <li><code>limit = 0.03</code> (30 PH)</li>
+</ul>
+<pre><code>{
+  "market": "EU",
+  "algorithm": "SHA256ASICBOOST",
+  "amount": 0.05,
+  "displayMarketFactor": "EH",
+  "marketFactor": 1000000000000000000,
+  "displayPriceFactor": "EH",
+  "priceFactor": 1000000000000000000,
+  "poolId": "4007f83c-0b2d-49bc-b51c-584d27215f28",
+  "bottomLimit": 0.02,
+  "limit": 0.03,
+  "subType": "BUSINESS_FIXED_SPEED"
+}</code></pre>
+<p><strong>Note:</strong> If the backend cannot allocate the full package at that moment, you may receive an allocation error. In that case, try again later, widen the speed window slightly, switch markets (EU/USA), or split the order into smaller ones.</p>
+<p><br></p>
+
+<h2>Troubleshooting Common Errors</h2>
+<ul>
+    <li><strong>5068 – Invalid order market factor</strong>: Wrong unit or factor (must match <code>/mining/algorithms</code>).</li>
+    <li><strong>2997 – Invalid order amount or limit or price</strong>: Amount too low, invalid speed window, or limit below minimum.</li>
+    <li><strong>5191 – Unable to allocate hashrate</strong>: Valid request, insufficient supply; retry or split.</li>
+</ul>
+<p><br></p>
+
+<h2>Additional Resources</h2>
+<ul>
+    <li><a href="https://www.nicehash.com/docs/rest/#!/algorithm-controller/getAlgorithms">MINING ALGORITHMS – GET /main/api/v2/mining/algorithms</a></li>
+    <li><a href="https://github.com/nicehash/rest-clients-demo">NiceHash REST Clients Demo (GitHub)</a></li>
+</ul>
+<p><br></p>
+
+<h2>Summary</h2>
+<p>You can place Business Orders either through the NiceHash interface or via API. The API approach is recommended for professional buyers who want automation and better control.</p>
+<p>Always validate algorithm limits using -&nbsp;<code>GET /main/api/v2/mining/algorithms.&nbsp;</code>Then construct your order payload accordingly.</p>

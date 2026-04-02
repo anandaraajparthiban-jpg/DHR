@@ -52,6 +52,7 @@ function normalizeRowKeys<T>(row: any): T {
   if ('nhordertype' in row && !('nhOrderType' in row)) row.nhOrderType = row.nhordertype;
   if ('nhsubtype' in row && !('nhSubType' in row)) row.nhSubType = row.nhsubtype;
   if ('nhbottomlimit' in row && !('nhBottomLimit' in row)) row.nhBottomLimit = row.nhbottomlimit;
+  if ('nhendts' in row && !('nhEndTs' in row)) row.nhEndTs = row.nhendts;
   if ('nhmarketfactor' in row && !('nhMarketFactor' in row)) row.nhMarketFactor = row.nhmarketfactor;
   if ('nhpricefactor' in row && !('nhPriceFactor' in row)) row.nhPriceFactor = row.nhpricefactor;
   if ('fulfillmentprovider' in row && !('fulfillmentProvider' in row)) row.fulfillmentProvider = row.fulfillmentprovider;
@@ -187,6 +188,7 @@ const migrations = [
     "nhOrderType" TEXT,
     "nhSubType" TEXT,
     "nhBottomLimit" DOUBLE PRECISION,
+    "nhEndTs" TEXT,
     "nhMarketFactor" TEXT,
     "nhPriceFactor" TEXT,
     "expiresAt" BIGINT,
@@ -243,6 +245,7 @@ const orderUpgradeCols: Array<[string, string]> = [
   ['nhOrderType', 'TEXT'],
   ['nhSubType', 'TEXT'],
   ['nhBottomLimit', 'DOUBLE PRECISION'],
+  ['nhEndTs', 'TEXT'],
   ['nhMarketFactor', 'TEXT'],
   ['nhPriceFactor', 'TEXT'],
   ['expiresAt', 'BIGINT'],
