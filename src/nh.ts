@@ -36,6 +36,20 @@ export interface NhMarketQuote {
   priceFactorRaw?: string;
 }
 
+export interface NhAlgorithmInfo {
+  algorithm: string;
+  title: string;
+  minSpeedLimit: number;
+  maxSpeedLimit: number;
+  minimalOrderAmount: number;
+  marketFactor: number;
+  displayMarketFactor: string;
+  priceFactor: number;
+  displayPriceFactor: string;
+  enabledMarkets: string[];
+  raw: any;
+}
+
 export function buildNhOrderParams({
   ph,
   hours,
@@ -138,6 +152,51 @@ function algoCode(a: any): string {
   if (typeof a.name === 'string') return a.name;
   if (typeof a.enumCode === 'string') return a.enumCode;
   return '';
+}
+
+function toFiniteNumber(...values: any[]): number {
+  for (const v of values) {
+    const n = Number(v);
+    if (isFinite(n)) return n;
+  }
+  return NaN;
+}
+
+export async function getNhAlgorithmInfo(algo: string = 'SHA256ASICBOOST'): Promise<NhAlgorithmInfo> {
+  const data: any = await nhPublicRequest('/main/api/v2/mining/algorithms');
+  const algos: any[] = data?.miningAlgorithms ?? data?.algorithms ?? [];
+  const entry = algos.find((a) => algoCode(a).toUpperCase() === algo.toUpperCase());
+  if (!entry) throw new Error(`algorithm ${algo} not found in mining/algorithms`);
+  const enabledMarketsRaw: any[] = Array.isArray(entry?.enabledMarketsNewOrder)
+    ? entry.enabledMarketsNewOrder
+    : Array.isArray(entry?.enabledMarkets)
+      ? entry.enabledMarkets
+      : Array.isArray(entry?.enabledHashpowerMarkets)
+        ? entry.enabledHashpowerMarkets
+        : [];
+  const enabledMarkets = enabledMarketsRaw
+    .map((m: any) => String(m?.market ?? m?.name ?? m ?? '').toUpperCase())
+    .filter(Boolean);
+
+  const minSpeedLimit = toFiniteNumber(entry?.minSpeedLimit, entry?.min_limit, entry?.minimumLimit, 0);
+  const maxSpeedLimit = toFiniteNumber(entry?.maxSpeedLimit, entry?.max_limit, entry?.maximumLimit, Number.POSITIVE_INFINITY);
+  const minimalOrderAmount = toFiniteNumber(entry?.minimalOrderAmount, entry?.minAmount, entry?.min_amount, 0);
+  const marketFactor = toFiniteNumber(entry?.marketFactor, entry?.market_factor, 0);
+  const priceFactor = toFiniteNumber(entry?.priceFactor, entry?.price_factor, 0);
+
+  return {
+    algorithm: algoCode(entry).toUpperCase(),
+    title: String(entry?.title ?? ''),
+    minSpeedLimit,
+    maxSpeedLimit,
+    minimalOrderAmount,
+    marketFactor,
+    displayMarketFactor: String(entry?.displayMarketFactor ?? entry?.marketDisplayFactor ?? ''),
+    priceFactor,
+    displayPriceFactor: String(entry?.displayPriceFactor ?? entry?.priceDisplayFactor ?? ''),
+    enabledMarkets,
+    raw: entry,
+  };
 }
 
 export async function getNhBuyInfo(algo: string = 'SHA256ASICBOOST'): Promise<NhBuyInfo> {

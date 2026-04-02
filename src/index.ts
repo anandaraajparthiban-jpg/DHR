@@ -126,6 +126,7 @@ const BECH32_MAP = new Map(BECH32_CHARSET.split('').map((c, i) => [c, i]));
 const BECH32M_CONST = 0x2bc830a3;
 
 console.log(`Routing config: NiceHash only, minimum start ${NICEHASH_MIN_START_AMOUNT_BTC.toFixed(8)} BTC`);
+console.log(`NiceHash order mode: ${(process.env.NICEHASH_ORDER_MODE ?? 'standard').trim().toLowerCase() || 'standard'}`);
 
 const commands = [
   new SlashCommandBuilder()
@@ -1003,8 +1004,18 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
     nhPrice: nh.price,
     nhLimit: nh.limit,
     nhAmount: nh.amount,
+    nhOrderType: nh.orderType,
+    nhSubType: nh.subType,
+    nhBottomLimit: nh.bottomLimit,
+    nhMarketFactor: nh.marketFactor,
+    nhPriceFactor: nh.priceFactor,
   });
-  const placed = `NiceHash order placed: ${nh.id} (market ${nh.market}, price ${nh.price.toFixed(8)} BTC/EH/day, limit ${nh.limit.toFixed(6)} EH/s).`;
+  const placed =
+    nh.orderType === 'business'
+      ? `NiceHash business order placed: ${nh.id} (market ${nh.market}, subtype ${nh.subType ?? 'BUSINESS_FIXED_SPEED'}, limit ${nh.limit.toFixed(
+          6
+        )} EH/s${typeof nh.bottomLimit === 'number' ? `, bottomLimit ${nh.bottomLimit.toFixed(6)} EH/s` : ''}, amount ${nh.amount.toFixed(8)} BTC).`
+      : `NiceHash order placed: ${nh.id} (market ${nh.market}, price ${nh.price.toFixed(8)} BTC/EH/day, limit ${nh.limit.toFixed(6)} EH/s).`;
 
   await updateExpiry(orderId, expiresAt);
   const msg = await markPaid(orderId);

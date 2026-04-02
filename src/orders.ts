@@ -29,6 +29,11 @@ export interface Order {
   nhPrice?: number;
   nhLimit?: number;
   nhAmount?: number;
+  nhOrderType?: string;
+  nhSubType?: string;
+  nhBottomLimit?: number;
+  nhMarketFactor?: string;
+  nhPriceFactor?: string;
   expiresAt?: number;
   fulfillmentProvider?: string;
 }
@@ -116,16 +121,35 @@ export async function completeOrder(id: string): Promise<void> {
 
 export async function saveNhInfo(
   id: string,
-  info: { nhOrderId: string; nhMarket: string; nhPrice: number; nhLimit: number; nhAmount: number }
+  info: {
+    nhOrderId: string;
+    nhMarket: string;
+    nhPrice: number;
+    nhLimit: number;
+    nhAmount: number;
+    nhOrderType?: string;
+    nhSubType?: string;
+    nhBottomLimit?: number;
+    nhMarketFactor?: string;
+    nhPriceFactor?: string;
+  }
 ): Promise<void> {
-  await dbRun('UPDATE orders SET "nhOrderId"=?, "nhMarket"=?, "nhPrice"=?, "nhLimit"=?, "nhAmount"=? WHERE id=?', [
-    info.nhOrderId,
-    info.nhMarket,
-    info.nhPrice,
-    info.nhLimit,
-    info.nhAmount,
-    id,
-  ]);
+  await dbRun(
+    'UPDATE orders SET "nhOrderId"=?, "nhMarket"=?, "nhPrice"=?, "nhLimit"=?, "nhAmount"=?, "nhOrderType"=?, "nhSubType"=?, "nhBottomLimit"=?, "nhMarketFactor"=?, "nhPriceFactor"=? WHERE id=?',
+    [
+      info.nhOrderId,
+      info.nhMarket,
+      info.nhPrice,
+      info.nhLimit,
+      info.nhAmount,
+      info.nhOrderType ?? null,
+      info.nhSubType ?? null,
+      info.nhBottomLimit ?? null,
+      info.nhMarketFactor ?? null,
+      info.nhPriceFactor ?? null,
+      id,
+    ]
+  );
   await dbRun('UPDATE orders SET "fulfillmentProvider" = ? WHERE id = ?', ['nicehash', id]);
 }
 

@@ -49,6 +49,11 @@ function normalizeRowKeys<T>(row: any): T {
   if ('nhprice' in row && !('nhPrice' in row)) row.nhPrice = row.nhprice;
   if ('nhlimit' in row && !('nhLimit' in row)) row.nhLimit = row.nhlimit;
   if ('nhamount' in row && !('nhAmount' in row)) row.nhAmount = row.nhamount;
+  if ('nhordertype' in row && !('nhOrderType' in row)) row.nhOrderType = row.nhordertype;
+  if ('nhsubtype' in row && !('nhSubType' in row)) row.nhSubType = row.nhsubtype;
+  if ('nhbottomlimit' in row && !('nhBottomLimit' in row)) row.nhBottomLimit = row.nhbottomlimit;
+  if ('nhmarketfactor' in row && !('nhMarketFactor' in row)) row.nhMarketFactor = row.nhmarketfactor;
+  if ('nhpricefactor' in row && !('nhPriceFactor' in row)) row.nhPriceFactor = row.nhpricefactor;
   if ('fulfillmentprovider' in row && !('fulfillmentProvider' in row)) row.fulfillmentProvider = row.fulfillmentprovider;
   if ('txid' in row && !('txId' in row)) row.txId = row.txid;
   if ('intentid' in row && !('intentId' in row)) row.intentId = row.intentid;
@@ -61,6 +66,7 @@ function normalizeRowKeys<T>(row: any): T {
     'nhPrice',
     'nhLimit',
     'nhAmount',
+    'nhBottomLimit',
     'expiresAt',
     'bumpMicros',
     'usdAmount',
@@ -178,6 +184,11 @@ const migrations = [
     "nhPrice" DOUBLE PRECISION,
     "nhLimit" DOUBLE PRECISION,
     "nhAmount" DOUBLE PRECISION,
+    "nhOrderType" TEXT,
+    "nhSubType" TEXT,
+    "nhBottomLimit" DOUBLE PRECISION,
+    "nhMarketFactor" TEXT,
+    "nhPriceFactor" TEXT,
     "expiresAt" BIGINT,
     "fulfillmentProvider" TEXT
   )`,
@@ -229,6 +240,11 @@ const orderUpgradeCols: Array<[string, string]> = [
   ['nhPrice', 'DOUBLE PRECISION'],
   ['nhLimit', 'DOUBLE PRECISION'],
   ['nhAmount', 'DOUBLE PRECISION'],
+  ['nhOrderType', 'TEXT'],
+  ['nhSubType', 'TEXT'],
+  ['nhBottomLimit', 'DOUBLE PRECISION'],
+  ['nhMarketFactor', 'TEXT'],
+  ['nhPriceFactor', 'TEXT'],
   ['expiresAt', 'BIGINT'],
   ['requestedProvider', 'TEXT'],
   ['fulfillmentProvider', 'TEXT'],
