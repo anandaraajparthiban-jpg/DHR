@@ -40,6 +40,7 @@ export interface NhOrderPlacementPlan {
   priceFactor?: string;
   bottomLimit?: number;
   endTs?: string;
+  durationSec?: number;
   requestCandidates: NhOrderRequestCandidate[];
 }
 
@@ -263,12 +264,14 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
   let payload: Record<string, unknown>;
   let bottomLimit: number | undefined;
   let endTs: string | undefined;
+  let durationSec: number | undefined;
   if (orderMode === 'business_fixed_speed' || orderMode === 'business_fixed_duration') {
     endpoint = '/main/api/v2/hashpower/business/order';
     orderType = 'business';
     const envBottomLimit = Number(process.env.NICEHASH_BUSINESS_BOTTOM_LIMIT_EH ?? NaN);
     const minSpeedLimit = Number(algoInfo.minSpeedLimit);
     if (orderMode === 'business_fixed_duration') {
+      durationSec = Math.max(1, Math.floor(opts.hours * 3600));
       const endMs = Date.now() + opts.hours * 3600 * 1000;
       endTs = new Date(endMs).toISOString();
       bottomLimit =
@@ -293,6 +296,7 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
     if (orderMode === 'business_fixed_speed') payload.limit = limit;
     if (typeof bottomLimit === 'number') payload.bottomLimit = bottomLimit;
     if (endTs) payload.endTs = endTs;
+    if (typeof durationSec === 'number') payload.duration = durationSec;
   } else {
     payload = {
       market,
@@ -341,6 +345,7 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
     priceFactor,
     bottomLimit,
     endTs,
+    durationSec,
     requestCandidates,
   };
 }
