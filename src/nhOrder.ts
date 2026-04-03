@@ -175,6 +175,38 @@ function isDurationSubtypeFallbackCandidateError(message: string): boolean {
   return message.includes('http 400');
 }
 
+function isRetryableCreateCandidateError(message: string): boolean {
+  // Candidate fallback variants only target request-shape constraints and allocation edge cases.
+  // Keep retries scoped to HTTP 400 failures.
+  return message.includes('http 400');
+}
+
+function extractNhErrorCodes(message: string): number[] {
+  const matches = [...message.matchAll(/"code"\s*:\s*(\d+)/g)];
+  const codes = matches
+    .map((m) => Number(m[1]))
+    .filter((n) => isFinite(n))
+    .map((n) => Math.trunc(n));
+  return Array.from(new Set(codes));
+}
+
+function isNhAllocationCapacityError(message: string): boolean {
+  const codes = extractNhErrorCodes(message);
+  if (codes.includes(5191)) return true;
+  return message.toLowerCase().includes('unable to allocate hashrate');
+}
+
+function formatNhCreateFailure(endpoint: string, payload: Record<string, unknown>, cause: string): string {
+  if (isNhAllocationCapacityError(cause)) {
+    return (
+      `NiceHash capacity unavailable (code 5191): unable to allocate hashrate for this package right now. ` +
+      `Try again later, reduce requested PH/duration, widen speed constraints, or switch mode/market. ` +
+      `endpoint=${endpoint} payload=${JSON.stringify(payload)} cause=${cause}`
+    );
+  }
+  return `NH order create failed endpoint=${endpoint} payload=${JSON.stringify(payload)} cause=${cause}`;
+}
+
 async function resolveNhOrderDraft(
   opts: NhOrderInput,
   orderMode: NhOrderMode
@@ -309,6 +341,23 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
               subType: 'BUSINESS_FIXED_SPEED',
               payload: speedFallbackPayload,
             });
+            if ('bottomLimit' in speedFallbackPayload) {
+              const speedNoBottomPayload: Record<string, unknown> = { ...speedFallbackPayload };
+              delete speedNoBottomPayload.bottomLimit;
+              candidates.push({
+                endpoint,
+                subType: 'BUSINESS_FIXED_SPEED',
+                payload: speedNoBottomPayload,
+              });
+            }
+          } else if ('bottomLimit' in payload) {
+            const speedNoBottomPayload: Record<string, unknown> = { ...payload, subType: 'BUSINESS_FIXED_SPEED' };
+            delete speedNoBottomPayload.bottomLimit;
+            candidates.push({
+              endpoint,
+              subType: 'BUSINESS_FIXED_SPEED',
+              payload: speedNoBottomPayload,
+            });
           }
           return candidates;
         })()
@@ -411,23 +460,23 @@ export async function createNhOrder(opts: NhOrderInput): Promise<NhOrderResult> 
       const msg = err instanceof Error ? err.message : String(err);
       lastErr = msg;
       const canFallback =
-        plan.mode === 'business_fixed_duration' &&
-        i === 0 &&
-        candidate.subType === 'BUSINESS_FIXED_DURATION' &&
-        plan.requestCandidates[i + 1]?.subType === 'BUSINESS_FIXED_SPEED' &&
-        isDurationSubtypeFallbackCandidateError(msg);
+        i < plan.requestCandidates.length - 1 &&
+        ((plan.mode === 'business_fixed_duration' &&
+          i === 0 &&
+          candidate.subType === 'BUSINESS_FIXED_DURATION' &&
+          plan.requestCandidates[i + 1]?.subType === 'BUSINESS_FIXED_SPEED' &&
+          isDurationSubtypeFallbackCandidateError(msg)) ||
+          isRetryableCreateCandidateError(msg));
       if (!canFallback) {
-        throw new Error(`NH order create failed endpoint=${candidate.endpoint} payload=${JSON.stringify(candidate.payload)} cause=${msg}`);
+        throw new Error(formatNhCreateFailure(candidate.endpoint, candidate.payload, msg));
       }
     }
   }
   if (!data) {
     const first = plan.requestCandidates[0];
-    throw new Error(
-      `NH order create failed endpoint=${first?.endpoint ?? '/main/api/v2/hashpower/order'} payload=${JSON.stringify(first?.payload ?? {})} cause=${
-        lastErr ?? 'unknown error'
-      }`
-    );
+    const endpoint = first?.endpoint ?? '/main/api/v2/hashpower/order';
+    const payload = (first?.payload ?? {}) as Record<string, unknown>;
+    throw new Error(formatNhCreateFailure(endpoint, payload, lastErr ?? 'unknown error'));
   }
   const id = data?.id ?? data?.orderId;
   if (!id) throw new Error('order create missing id');
