@@ -76,6 +76,7 @@ export async function quoteHashrate(input: QuoteInput): Promise<QuoteResult> {
 // Fetch BTC/USD with fallback and optional override.
 export async function btcUsd(): Promise<number> {
   const override = process.env.BTC_USD_OVERRIDE ? Number(process.env.BTC_USD_OVERRIDE) : undefined;
+  let coingeckoErr: unknown;
   try {
     const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd');
     if (!res.ok) throw new Error('coingecko failed');
@@ -84,7 +85,7 @@ export async function btcUsd(): Promise<number> {
     if (typeof price !== 'number') throw new Error('coingecko missing price');
     return price;
   } catch (err) {
-    console.error('btcUsd coingecko error', err);
+    coingeckoErr = err;
     try {
       const res2 = await fetch('https://api.coinbase.com/v2/prices/BTC-USD/spot');
       if (!res2.ok) throw new Error('coinbase failed');
@@ -93,7 +94,9 @@ export async function btcUsd(): Promise<number> {
       if (!isFinite(price2)) throw new Error('coinbase missing price');
       return price2;
     } catch (err2) {
-      console.error('btcUsd coinbase error', err2);
+      const c1 = coingeckoErr instanceof Error ? coingeckoErr.message : String(coingeckoErr);
+      const c2 = err2 instanceof Error ? err2.message : String(err2);
+      console.warn(`btcUsd providers failed (coingecko=${c1}; coinbase=${c2})`);
       if (override && isFinite(override)) return override;
       throw new Error('btc price failed');
     }

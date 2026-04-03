@@ -24,8 +24,8 @@ It also shows how to preview payloads before placing live orders.
 ## `business_fixed_duration`
 - Endpoint: `POST /main/api/v2/hashpower/business/order`
 - Bot computes `endTs` from requested `hours`.
-- Bot sends `subType: "BUSINESS_FIXED_DURATION"` only.
-- Includes `amount`, `limit`, `endTs`, and `bottomLimit` (env override or minimum speed).
+- Bot sends `subType: "BUSINESS_ENGINE"` only.
+- Includes `amount`, `endTs`, and `bottomLimit` (env override or minimum speed).
 
 ## 2) Environment Variables
 
@@ -47,7 +47,7 @@ NICEHASH_BUSINESS_DURATION_MIN_END_SEC=900
 
 Notes:
 - `NICEHASH_BUSINESS_DURATION_MIN_END_SEC` default is `900` (15 minutes).
-- If `NICEHASH_BUSINESS_BOTTOM_LIMIT_EH` is not set in duration mode, bot uses algorithm min speed (or `limit` if algorithm minimum is unavailable).
+- If `NICEHASH_BUSINESS_BOTTOM_LIMIT_EH` is not set in duration mode, bot uses algorithm min speed (or internal computed speed if algorithm minimum is unavailable).
 
 ## 3) Recommended Dry-Run Before Live Orders
 
@@ -142,7 +142,7 @@ npm run nh:dry-run -- --ph 25 --hours 24 --pool stratum+tcp://pool.example.com:3
 ```
 
 Expected candidate:
-- One request with `subType: "BUSINESS_FIXED_DURATION"`.
+- One request with `subType: "BUSINESS_ENGINE"`.
 - Includes `endTs` and `bottomLimit`.
 
 Live placement behavior:

@@ -80,6 +80,10 @@ function resolveBusinessDurationMinEndSec(): number {
   return Math.max(60, Math.floor(raw));
 }
 
+function resolveBusinessDurationSubType(): 'BUSINESS_ENGINE' {
+  return 'BUSINESS_ENGINE';
+}
+
 async function resolveNhOrderEconomics(opts: Pick<NhOrderInput, 'ph' | 'hours' | 'usdPerPhDay'>): Promise<NhOrderEconomics> {
   const { ph, hours, usdPerPhDay } = opts;
 
@@ -140,11 +144,11 @@ function validateBusinessOrderLimits(limit: number, amount: number, algoInfo: Aw
   }
 }
 
-function validateBusinessBottomLimit(bottomLimit: number, limit: number, algoInfo: Awaited<ReturnType<typeof getNhAlgorithmInfo>>) {
+function validateBusinessBottomLimit(bottomLimit: number, limit: number | undefined, algoInfo: Awaited<ReturnType<typeof getNhAlgorithmInfo>>) {
   if (!isFinite(bottomLimit) || bottomLimit <= 0) {
     throw new Error(`Business order bottomLimit must be > 0. Received ${bottomLimit}.`);
   }
-  if (bottomLimit > limit) {
+  if (typeof limit === 'number' && isFinite(limit) && bottomLimit > limit) {
     throw new Error(`Business order bottomLimit ${bottomLimit} cannot exceed limit ${limit}.`);
   }
   const minSpeedLimit = Number(algoInfo.minSpeedLimit);
@@ -273,7 +277,7 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
           : isFinite(minSpeedLimit) && minSpeedLimit > 0
             ? minSpeedLimit
             : limit;
-      validateBusinessBottomLimit(bottomLimit, limit, algoInfo);
+      validateBusinessBottomLimit(bottomLimit, undefined, algoInfo);
     } else if (isFinite(envBottomLimit) && envBottomLimit > 0) {
       bottomLimit = envBottomLimit;
       validateBusinessBottomLimit(bottomLimit, limit, algoInfo);
@@ -282,11 +286,11 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
       market,
       algorithm: 'SHA256ASICBOOST',
       amount,
-      limit,
       poolId,
       displayMarketFactor,
       displayPriceFactor,
     };
+    if (orderMode === 'business_fixed_speed') payload.limit = limit;
     if (typeof bottomLimit === 'number') payload.bottomLimit = bottomLimit;
     if (endTs) payload.endTs = endTs;
   } else {
@@ -310,10 +314,10 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
       ? [
           {
             endpoint,
-            subType: orderMode === 'business_fixed_duration' ? 'BUSINESS_FIXED_DURATION' : 'BUSINESS_FIXED_SPEED',
+            subType: orderMode === 'business_fixed_duration' ? resolveBusinessDurationSubType() : 'BUSINESS_FIXED_SPEED',
             payload: {
               ...payload,
-              subType: orderMode === 'business_fixed_duration' ? 'BUSINESS_FIXED_DURATION' : 'BUSINESS_FIXED_SPEED',
+              subType: orderMode === 'business_fixed_duration' ? resolveBusinessDurationSubType() : 'BUSINESS_FIXED_SPEED',
             },
           },
         ]
