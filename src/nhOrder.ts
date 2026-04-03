@@ -170,15 +170,9 @@ function validateBusinessDurationGuardrails(hours: number): void {
 }
 
 function isDurationSubtypeFallbackCandidateError(message: string): boolean {
-  const lower = message.toLowerCase();
-  return (
-    message.includes('http 400') &&
-    (lower.includes('subtype') ||
-      lower.includes('business_fixed_duration') ||
-      lower.includes('enum') ||
-      lower.includes('invalid request') ||
-      lower.includes('validation'))
-  );
+  // NiceHash can return generic "Malformed request" for unsupported duration subtype payloads.
+  // Retry once with a fixed-speed-compatible payload whenever the duration attempt returns HTTP 400.
+  return message.includes('http 400');
 }
 
 async function resolveNhOrderDraft(
@@ -298,14 +292,26 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
 
   const requestCandidates: NhOrderRequestCandidate[] =
     orderType === 'business'
-      ? (orderMode === 'business_fixed_duration'
-          ? Array.from(new Set([resolveBusinessDurationSubtypePreference(), 'BUSINESS_FIXED_SPEED']))
-          : ['BUSINESS_FIXED_SPEED']
-        ).map((subType) => ({
-          endpoint,
-          subType,
-          payload: { ...payload, subType },
-        }))
+      ? (() => {
+          const candidates: NhOrderRequestCandidate[] = [];
+          const requestedSubType =
+            orderMode === 'business_fixed_duration' ? resolveBusinessDurationSubtypePreference() : 'BUSINESS_FIXED_SPEED';
+          candidates.push({
+            endpoint,
+            subType: requestedSubType,
+            payload: { ...payload, subType: requestedSubType },
+          });
+          if (orderMode === 'business_fixed_duration' && requestedSubType !== 'BUSINESS_FIXED_SPEED') {
+            const speedFallbackPayload: Record<string, unknown> = { ...payload, subType: 'BUSINESS_FIXED_SPEED' };
+            delete speedFallbackPayload.endTs;
+            candidates.push({
+              endpoint,
+              subType: 'BUSINESS_FIXED_SPEED',
+              payload: speedFallbackPayload,
+            });
+          }
+          return candidates;
+        })()
       : [
           {
             endpoint,
