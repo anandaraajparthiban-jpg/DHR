@@ -40,7 +40,6 @@ export interface NhOrderPlacementPlan {
   priceFactor?: string;
   bottomLimit?: number;
   endTs?: string;
-  durationSec?: number;
   requestCandidates: NhOrderRequestCandidate[];
 }
 
@@ -79,10 +78,6 @@ function resolveBusinessDurationMinEndSec(): number {
   const raw = Number(process.env.NICEHASH_BUSINESS_DURATION_MIN_END_SEC ?? '900');
   if (!isFinite(raw) || raw <= 0) return 900;
   return Math.max(60, Math.floor(raw));
-}
-
-function resolveBusinessDurationSubType(): 'BUSINESS_ENGINE' {
-  return 'BUSINESS_ENGINE';
 }
 
 async function resolveNhOrderEconomics(opts: Pick<NhOrderInput, 'ph' | 'hours' | 'usdPerPhDay'>): Promise<NhOrderEconomics> {
@@ -264,14 +259,12 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
   let payload: Record<string, unknown>;
   let bottomLimit: number | undefined;
   let endTs: string | undefined;
-  let durationSec: number | undefined;
   if (orderMode === 'business_fixed_speed' || orderMode === 'business_fixed_duration') {
     endpoint = '/main/api/v2/hashpower/business/order';
     orderType = 'business';
     const envBottomLimit = Number(process.env.NICEHASH_BUSINESS_BOTTOM_LIMIT_EH ?? NaN);
     const minSpeedLimit = Number(algoInfo.minSpeedLimit);
     if (orderMode === 'business_fixed_duration') {
-      durationSec = Math.max(1, Math.floor(opts.hours * 3600));
       const endMs = Date.now() + opts.hours * 3600 * 1000;
       endTs = new Date(endMs).toISOString();
       bottomLimit =
@@ -290,13 +283,13 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
       algorithm: 'SHA256ASICBOOST',
       amount,
       poolId,
+      type: 'BUSINESS',
       displayMarketFactor,
       displayPriceFactor,
     };
     if (orderMode === 'business_fixed_speed') payload.limit = limit;
     if (typeof bottomLimit === 'number') payload.bottomLimit = bottomLimit;
     if (endTs) payload.endTs = endTs;
-    if (typeof durationSec === 'number') payload.duration = durationSec;
   } else {
     payload = {
       market,
@@ -313,15 +306,16 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
   if (marketFactor) payload.marketFactor = marketFactor;
   if (priceFactor) payload.priceFactor = priceFactor;
 
+  const businessSubType = orderMode === 'business_fixed_speed' ? 'BUSINESS_FIXED_SPEED' : undefined;
   const requestCandidates: NhOrderRequestCandidate[] =
     orderType === 'business'
       ? [
           {
             endpoint,
-            subType: orderMode === 'business_fixed_duration' ? resolveBusinessDurationSubType() : 'BUSINESS_FIXED_SPEED',
+            subType: businessSubType,
             payload: {
               ...payload,
-              subType: orderMode === 'business_fixed_duration' ? resolveBusinessDurationSubType() : 'BUSINESS_FIXED_SPEED',
+              ...(businessSubType ? { subType: businessSubType } : {}),
             },
           },
         ]
@@ -345,7 +339,6 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
     priceFactor,
     bottomLimit,
     endTs,
-    durationSec,
     requestCandidates,
   };
 }

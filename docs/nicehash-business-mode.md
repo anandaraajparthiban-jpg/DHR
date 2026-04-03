@@ -24,8 +24,8 @@ It also shows how to preview payloads before placing live orders.
 ## `business_fixed_duration`
 - Endpoint: `POST /main/api/v2/hashpower/business/order`
 - Bot computes `endTs` from requested `hours`.
-- Bot sends `subType: "BUSINESS_ENGINE"` only.
-- Includes `amount`, `duration` (seconds), `endTs`, and `bottomLimit` (env override or minimum speed).
+- Bot sends `type: "BUSINESS"` and no subtype override.
+- Includes `amount`, `endTs`, and `bottomLimit` (env override or minimum speed).
 
 ## 2) Environment Variables
 
@@ -79,7 +79,7 @@ Admin command:
 
 - Returns request payload candidate as JSON.
 - Does not place an order.
-- Useful for confirming mode, subtype, factors, `duration`, `endTs`, and `bottomLimit`.
+- Useful for confirming mode, subtype, factors, `endTs`, and `bottomLimit`.
 
 ## 4.1) User-Facing Mode Selection
 
@@ -142,8 +142,8 @@ npm run nh:dry-run -- --ph 25 --hours 24 --pool stratum+tcp://pool.example.com:3
 ```
 
 Expected candidate:
-- One request with `subType: "BUSINESS_ENGINE"`.
-- Includes `duration`, `endTs`, and `bottomLimit`.
+- One request with `type: "BUSINESS"` (no subtype).
+- Includes `endTs` and `bottomLimit`.
 
 Live placement behavior:
 - Bot sends only the selected mode payload (no cross-mode fallback).
