@@ -63,8 +63,13 @@ export TOKEN=$(echo "$LOGIN_RESPONSE" | sed -n 's/.*"accessToken":"\([^"]*\)".*/
 curl -s "$BASE_URL/quote" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"ph":1,"hours":12}'
+  -d '{"ph":1,"hours":12,"orderMode":"business_fixed_duration"}'
 ```
+
+`orderMode` is optional. Allowed values:
+- `standard`
+- `business_fixed_speed`
+- `business_fixed_duration`
 
 ## 5.2 Rent / Create Order
 
@@ -78,7 +83,8 @@ curl -s "$BASE_URL/rent" \
     "ph": 1,
     "hours": 12,
     "pool": "stratum+tcp://yourpool:3333",
-    "worker": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+    "worker": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT",
+    "orderMode": "business_fixed_speed"
   }'
 ```
 

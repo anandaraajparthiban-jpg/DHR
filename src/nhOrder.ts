@@ -49,6 +49,7 @@ export interface NhOrderInput {
   poolUrl: string;
   worker: string;
   usdPerPhDay: number;
+  orderMode?: NhOrderMode;
 }
 
 interface BuildNhOrderPlanOptions {
@@ -66,8 +67,8 @@ interface NhOrderEconomics {
   algoInfo: Awaited<ReturnType<typeof getNhAlgorithmInfo>>;
 }
 
-export function resolveNhOrderMode(): NhOrderMode {
-  const raw = (process.env.NICEHASH_ORDER_MODE ?? 'standard').trim().toLowerCase();
+export function resolveNhOrderMode(override?: string): NhOrderMode {
+  const raw = (override ?? process.env.NICEHASH_ORDER_MODE ?? 'standard').trim().toLowerCase();
   if (raw === 'business_fixed_speed') return 'business_fixed_speed';
   if (raw === 'business_fixed_duration') return 'business_fixed_duration';
   return 'standard';
@@ -202,12 +203,14 @@ async function resolveNhOrderDraft(
 }
 
 export async function ensureNhOrderSatisfiesMinimum(opts: NhOrderInput): Promise<void> {
-  await resolveNhOrderDraft(opts, resolveNhOrderMode());
+  await resolveNhOrderDraft(opts, resolveNhOrderMode(opts.orderMode));
 }
 
-export async function ensureNhQuotedOrderSatisfiesMinimum(opts: Pick<NhOrderInput, 'ph' | 'hours' | 'usdPerPhDay'>): Promise<void> {
+export async function ensureNhQuotedOrderSatisfiesMinimum(
+  opts: Pick<NhOrderInput, 'ph' | 'hours' | 'usdPerPhDay' | 'orderMode'>
+): Promise<void> {
   const economics = await resolveNhOrderEconomics(opts);
-  const orderMode = resolveNhOrderMode();
+  const orderMode = resolveNhOrderMode(opts.orderMode);
   if (orderMode === 'business_fixed_speed' || orderMode === 'business_fixed_duration') {
     validateBusinessOrderLimits(economics.limit, economics.amount, economics.algoInfo);
     if (orderMode === 'business_fixed_duration') {
@@ -217,7 +220,7 @@ export async function ensureNhQuotedOrderSatisfiesMinimum(opts: Pick<NhOrderInpu
 }
 
 async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrderPlanOptions): Promise<NhOrderPlacementPlan> {
-  const orderMode = resolveNhOrderMode();
+  const orderMode = resolveNhOrderMode(opts.orderMode);
   const { worker } = opts;
   const { host, port, market, price: finalPrice, limit, amount, buyInfo, best, algoInfo } = await resolveNhOrderDraft(opts, orderMode);
 

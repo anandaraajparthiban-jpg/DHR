@@ -53,11 +53,17 @@ Purpose: preview price before ordering.
 Parameters:
 - `ph` (number, required): requested PH
 - `hours` (int, required): rental duration
+- `order_mode` (optional): `standard`, `business_fixed_speed`, or `business_fixed_duration`
 
 Example:
 ```text
 /quote ph:2.5 hours:24
 ```
+
+Mode guidance shown in quote:
+- `standard`: fixed price/limit style marketplace order
+- `business_fixed_speed`: targets fixed speed window
+- `business_fixed_duration`: targets end time and speed can vary
 
 ## 4.2 `/rent`
 Purpose: create an order and receive payment instructions.
@@ -67,6 +73,7 @@ Parameters:
 - `hours` (int, required)
 - `pool` (required): pool URL
 - `worker` (required): BTC mainnet address only (no suffix like `.worker`)
+- `order_mode` (optional): `standard`, `business_fixed_speed`, or `business_fixed_duration`
 
 Example:
 ```text
@@ -75,6 +82,7 @@ Example:
 
 Notes:
 - Pool must pass allowlist/validation configured by operator.
+- If `order_mode` is omitted, bot uses operator default mode from environment.
 
 ## 4.3 `/status`
 Purpose: order lifecycle and provider status.

@@ -25,7 +25,15 @@ import {
 } from './orders.js';
 import { validatePool } from './pools.js';
 import { nicehashBalanceUsd } from './balances.js';
-import { createNhOrder, cancelNhOrder, ensureNhOrderSatisfiesMinimum, ensureNhQuotedOrderSatisfiesMinimum, previewNhOrderPlacement } from './nhOrder.js';
+import {
+  createNhOrder,
+  cancelNhOrder,
+  ensureNhOrderSatisfiesMinimum,
+  ensureNhQuotedOrderSatisfiesMinimum,
+  previewNhOrderPlacement,
+  resolveNhOrderMode,
+  type NhOrderMode,
+} from './nhOrder.js';
 import { ensurePaymentIntent, getPaymentIntentByOrder } from './payments.js';
 import { runPaymentVerificationTick, runPaymentVerificationDebug, startPaymentVerificationLoop } from './paymentVerifier.js';
 import {
@@ -133,14 +141,36 @@ const commands = [
     .setName('quote')
     .setDescription('Get a hashrate quote')
     .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
-    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72)),
+    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72))
+    .addStringOption((opt) =>
+      opt
+        .setName('order_mode')
+        .setDescription('NiceHash order mode (default uses operator setting)')
+        .setRequired(false)
+        .addChoices(
+          { name: 'Standard', value: 'standard' },
+          { name: 'Business Fixed Speed', value: 'business_fixed_speed' },
+          { name: 'Business Fixed Duration', value: 'business_fixed_duration' }
+        )
+    ),
   new SlashCommandBuilder()
     .setName('rent')
     .setDescription('Place a hashrate rental')
     .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
     .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72))
     .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL').setRequired(true))
-    .addStringOption((opt) => opt.setName('worker').setDescription('BTC address only (no suffix)').setRequired(true)),
+    .addStringOption((opt) => opt.setName('worker').setDescription('BTC address only (no suffix)').setRequired(true))
+    .addStringOption((opt) =>
+      opt
+        .setName('order_mode')
+        .setDescription('NiceHash order mode (default uses operator setting)')
+        .setRequired(false)
+        .addChoices(
+          { name: 'Standard', value: 'standard' },
+          { name: 'Business Fixed Speed', value: 'business_fixed_speed' },
+          { name: 'Business Fixed Duration', value: 'business_fixed_duration' }
+        )
+    ),
   new SlashCommandBuilder()
     .setName('status')
     .setDescription('Check rental status')
@@ -180,6 +210,17 @@ const commands = [
     .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72))
     .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL').setRequired(true))
     .addStringOption((opt) => opt.setName('worker').setDescription('BTC address only (no suffix)').setRequired(true))
+    .addStringOption((opt) =>
+      opt
+        .setName('order_mode')
+        .setDescription('NiceHash order mode (default uses operator setting)')
+        .setRequired(false)
+        .addChoices(
+          { name: 'Standard', value: 'standard' },
+          { name: 'Business Fixed Speed', value: 'business_fixed_speed' },
+          { name: 'Business Fixed Duration', value: 'business_fixed_duration' }
+        )
+    )
     .addBooleanOption((opt) =>
       opt.setName('resolve_pool_id').setDescription('If true, resolve/create actual NiceHash poolId (side effect)')
     ),
@@ -600,6 +641,47 @@ function validateSizeDuration(ph: number, hours: number): string | undefined {
   return undefined;
 }
 
+function parseNhOrderModeInput(raw: unknown): NhOrderMode | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const normalized = trimmed.toLowerCase();
+  if (normalized !== 'standard' && normalized !== 'business_fixed_speed' && normalized !== 'business_fixed_duration') {
+    return undefined;
+  }
+  return resolveNhOrderMode(normalized);
+}
+
+function parseApiNhOrderMode(body: Record<string, unknown>): NhOrderMode | undefined {
+  const raw = body.orderMode ?? body.order_mode ?? body.nhOrderMode ?? body.mode;
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'string') {
+    throw new ApiHttpError(400, 'bad_request', "Field 'orderMode' must be one of: standard, business_fixed_speed, business_fixed_duration");
+  }
+  const parsed = parseNhOrderModeInput(raw);
+  if (!parsed) {
+    throw new ApiHttpError(400, 'bad_request', "Field 'orderMode' must be one of: standard, business_fixed_speed, business_fixed_duration");
+  }
+  return parsed;
+}
+
+function nhOrderModeLabel(mode: NhOrderMode): string {
+  if (mode === 'business_fixed_speed') return 'Business Fixed Speed';
+  if (mode === 'business_fixed_duration') return 'Business Fixed Duration';
+  return 'Standard';
+}
+
+function nhOrderModeBehavior(mode: NhOrderMode): string {
+  if (mode === 'business_fixed_speed') {
+    return 'Speed target stays fixed (within market availability); order completion time can vary.';
+  }
+  if (mode === 'business_fixed_duration') {
+    return 'End time is targeted; speed can vary over time based on market conditions and available funds.';
+  }
+  return 'Standard marketplace order with fixed price/limit parameters.';
+}
+
 function parseClaimSet(value: unknown): Set<string> {
   const out = new Set<string>();
   if (typeof value === 'string') {
@@ -997,6 +1079,7 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
   const o = await getOrder(orderId);
   if (!o) throw new Error('Not found');
   const selectedProvider: FulfillmentProvider = DEFAULT_FULFILLMENT_PROVIDER;
+  const effectiveOrderMode = resolveNhOrderMode(o.nhRequestedMode);
 
   if (requirePaymentConfirmed) {
     const payment = await getPaymentIntentByOrder(orderId);
@@ -1007,7 +1090,14 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
 
   let expiresAt = Date.now() + o.hours * 3600 * 1000;
   const usdPerPhDay = await latestBaseUsdPerPhDay(o);
-  const nh = await createNhOrder({ ph: o.ph, hours: o.hours, poolUrl: o.pool, worker: o.worker, usdPerPhDay });
+  const nh = await createNhOrder({
+    ph: o.ph,
+    hours: o.hours,
+    poolUrl: o.pool,
+    worker: o.worker,
+    usdPerPhDay,
+    orderMode: effectiveOrderMode,
+  });
   await saveNhInfo(orderId, {
     nhOrderId: nh.id,
     nhMarket: nh.market,
@@ -1039,7 +1129,7 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
     o.user,
     `Your DHR order ${orderId} is now active.\nProvider: ${providerLabel(
       refreshed?.fulfillmentProvider ?? selectedProvider
-    )}\nPool: ${o.pool}\nWorker: ${o.worker}\nEnds: ${new Date(expiresAt).toISOString()}`
+    )}\nMode: ${nhOrderModeLabel(effectiveOrderMode)}\nPool: ${o.pool}\nWorker: ${o.worker}\nEnds: ${new Date(expiresAt).toISOString()}`
   );
 
   return `${msg}\n${placed}`;
@@ -1247,6 +1337,8 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
       const body = await readJsonBody(req, cfg.maxBodyBytes);
       const ph = bodyNumber(body, 'ph');
       const hours = bodyInteger(body, 'hours');
+      const requestedOrderMode = parseApiNhOrderMode(body);
+      const effectiveOrderMode = resolveNhOrderMode(requestedOrderMode);
       const validationError = validateSizeDuration(ph, hours);
       if (validationError) throw new ApiHttpError(400, 'validation_error', validationError);
 
@@ -1257,6 +1349,7 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
           ph,
           hours,
           usdPerPhDay: resolved.routingQuote.baseUsdPerPhDay,
+          orderMode: effectiveOrderMode,
         });
       } catch (err) {
         throw new ApiHttpError(503, 'quote_unavailable', err instanceof Error ? err.message : 'Quote unavailable');
@@ -1276,6 +1369,9 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
         quote: {
           ph,
           hours,
+          orderMode: effectiveOrderMode,
+          orderModeLabel: nhOrderModeLabel(effectiveOrderMode),
+          orderModeBehavior: nhOrderModeBehavior(effectiveOrderMode),
           source: q.source,
           totalUsd: q.totalUsd,
           unitUsdPerPhDay: q.usdPerPhDay,
@@ -1309,6 +1405,8 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
       const hours = bodyInteger(body, 'hours');
       const pool = bodyString(body, 'pool');
       const worker = bodyString(body, 'worker');
+      const requestedOrderMode = parseApiNhOrderMode(body);
+      const effectiveOrderMode = resolveNhOrderMode(requestedOrderMode);
 
       const validationError = validateSizeDuration(ph, hours);
       if (validationError) throw new ApiHttpError(400, 'validation_error', validationError);
@@ -1340,6 +1438,7 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
             poolUrl: pool,
             worker,
             usdPerPhDay: resolved.routingQuote.baseUsdPerPhDay,
+            orderMode: effectiveOrderMode,
           });
         } catch (err) {
           throw new ApiHttpError(
@@ -1356,6 +1455,7 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
         pool,
         worker,
         requestedProvider: resolved.provider,
+        nhRequestedMode: effectiveOrderMode,
         user: auth.userId,
         totalUsd: resolved.pricedQuote.totalUsd,
       });
@@ -1371,6 +1471,9 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
         ok: true,
         message: 'Order created',
         order,
+        orderMode: effectiveOrderMode,
+        orderModeLabel: nhOrderModeLabel(effectiveOrderMode),
+        orderModeBehavior: nhOrderModeBehavior(effectiveOrderMode),
         payment: {
           id: payment.id,
           status: payment.status,
@@ -1398,6 +1501,7 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
           id: o.id,
           status: o.status,
           requestedProvider: o.requestedProvider,
+          orderMode: o.nhRequestedMode ?? null,
           fulfillmentProvider: o.fulfillmentProvider,
           ph: o.ph,
           hours: o.hours,
@@ -1602,6 +1706,8 @@ client.on('interactionCreate', async (interaction) => {
 async function handleQuote(interaction: ChatInputCommandInteraction) {
   const ph = interaction.options.getNumber('ph', true);
   const hours = interaction.options.getInteger('hours', true);
+  const requestedOrderMode = parseNhOrderModeInput(interaction.options.getString('order_mode'));
+  const effectiveOrderMode = resolveNhOrderMode(requestedOrderMode);
   const pool = 'quote';
   const worker = 'quote';
 
@@ -1642,6 +1748,7 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
       ph,
       hours,
       usdPerPhDay: resolved.routingQuote.baseUsdPerPhDay,
+      orderMode: effectiveOrderMode,
     });
   } catch (err) {
     const msg = (err as Error).message || 'No valid quote available right now.';
@@ -1671,6 +1778,8 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
   const lines = [
     `Quote: ${ph} PH for ${hours}h -> ${usdBtcLine(q.totalUsd, btcPrice)} (unit: ${usdBtcLine(q.usdPerPhDay, btcPrice)} / PH-day).`,
     `Estimated provider: ${providerLabel(provider)}.`,
+    `Order mode: ${nhOrderModeLabel(effectiveOrderMode)}.`,
+    `Mode behavior: ${nhOrderModeBehavior(effectiveOrderMode)}`,
     `  Base: ${usdBtcLine(q.baseUsdPerPhDay, btcPrice)} / PH-day -> ${usdBtcLine(baseTotal, btcPrice)}`,
     feeLineBps,
     marginLineBps,
@@ -1700,6 +1809,8 @@ async function handleNhPayloadPreview(interaction: ChatInputCommandInteraction) 
   const hours = interaction.options.getInteger('hours', true);
   const pool = interaction.options.getString('pool', true);
   const worker = interaction.options.getString('worker', true);
+  const requestedOrderMode = parseNhOrderModeInput(interaction.options.getString('order_mode'));
+  const effectiveOrderMode = resolveNhOrderMode(requestedOrderMode);
   const resolvePoolId = interaction.options.getBoolean('resolve_pool_id') ?? false;
 
   if (!isValidWorkerName(worker)) {
@@ -1754,6 +1865,7 @@ async function handleNhPayloadPreview(interaction: ChatInputCommandInteraction) 
         poolUrl: pool,
         worker,
         usdPerPhDay: routingQuote.baseUsdPerPhDay,
+        orderMode: effectiveOrderMode,
       },
       { resolvePoolId, poolIdPlaceholder: '<resolved_at_order_time>' }
     );
@@ -1761,6 +1873,8 @@ async function handleNhPayloadPreview(interaction: ChatInputCommandInteraction) 
     const body = JSON.stringify(
       {
         mode: plan.mode,
+        modeLabel: nhOrderModeLabel(plan.mode),
+        modeBehavior: nhOrderModeBehavior(plan.mode),
         orderType: plan.orderType,
         market: plan.market,
         limit: plan.limit,
@@ -1791,6 +1905,8 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
   const hours = interaction.options.getInteger('hours', true);
   const pool = interaction.options.getString('pool', true);
   const worker = interaction.options.getString('worker', true);
+  const requestedOrderMode = parseNhOrderModeInput(interaction.options.getString('order_mode'));
+  const effectiveOrderMode = resolveNhOrderMode(requestedOrderMode);
 
   if (!isValidWorkerName(worker)) {
     await interaction.reply({
@@ -1864,6 +1980,7 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
         worker,
         // NiceHash order funding must use the raw base quote only.
         usdPerPhDay: routingQuote.baseUsdPerPhDay,
+        orderMode: effectiveOrderMode,
       });
     } catch (err) {
       const msg = (err as Error).message || 'Order does not satisfy NiceHash minimum requirements.';
@@ -1881,6 +1998,7 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
     pool,
     worker,
     requestedProvider: provider,
+    nhRequestedMode: effectiveOrderMode,
     user: interaction.user.id,
     totalUsd: q.totalUsd,
   });
@@ -1905,6 +2023,8 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
 
   const lines = [
     `Order ${order.id} accepted. Status: ${order.status}. Provider selected: ${providerLabel(provider)}.`,
+    `Order mode: ${nhOrderModeLabel(effectiveOrderMode)}.`,
+    `Mode behavior: ${nhOrderModeBehavior(effectiveOrderMode)}`,
     `Payment reference: ${payment.reference} (expires ${expiryIso})`,
     ...paymentMethods,
     'Important: pay the exact amount shown (all decimals). Underpayment keeps the order pending.',
@@ -1978,6 +2098,7 @@ async function handleStatus(interaction: ChatInputCommandInteraction) {
   const status = [
     `Order ${id}: ${o.status}`,
     `Requested provider: ${providerLabel(o.requestedProvider)}`,
+    `Order mode: ${nhOrderModeLabel(resolveNhOrderMode(o.nhRequestedMode))}`,
     `Active provider: ${providerLabel(o.fulfillmentProvider)}`,
     `Size: ${o.ph} PH for ${o.hours}h`,
     `Pool: ${o.pool}`,

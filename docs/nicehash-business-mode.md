@@ -82,6 +82,17 @@ Admin command:
 - Does not place an order.
 - Useful for confirming mode, subtype, factors, `endTs`, and `bottomLimit`.
 
+## 4.1) User-Facing Mode Selection
+
+Users can choose mode per request in Discord:
+
+```text
+/quote ph:<num> hours:<num> order_mode:<standard|business_fixed_speed|business_fixed_duration>
+/rent ph:<num> hours:<num> pool:<url> worker:<btc_address> order_mode:<standard|business_fixed_speed|business_fixed_duration>
+```
+
+If `order_mode` is omitted, bot uses operator default `NICEHASH_ORDER_MODE`.
+
 ## 5) Mode-Specific Examples
 
 ## Example A: Standard

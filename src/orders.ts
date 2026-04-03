@@ -9,6 +9,7 @@ interface OrderInput {
   pool: string;
   worker: string;
   requestedProvider: string;
+  nhRequestedMode?: string;
   user: string;
   totalUsd: number;
 }
@@ -20,6 +21,7 @@ export interface Order {
   pool: string;
   worker: string;
   requestedProvider?: string;
+  nhRequestedMode?: string;
   user: string;
   status: OrderStatus;
   totalUsd: number;
@@ -46,8 +48,8 @@ export async function createOrder(input: OrderInput): Promise<Order> {
 
   await dbRun(
     `INSERT INTO orders
-     (id, ph, hours, pool, worker, "requestedProvider", "user", status, "totalUsd", "createdAt", "nhOrderId", "nhMarket", "nhPrice", "nhLimit", "nhAmount", "expiresAt", "fulfillmentProvider")
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (id, ph, hours, pool, worker, "requestedProvider", "nhRequestedMode", "user", status, "totalUsd", "createdAt", "nhOrderId", "nhMarket", "nhPrice", "nhLimit", "nhAmount", "expiresAt", "fulfillmentProvider")
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.ph,
@@ -55,6 +57,7 @@ export async function createOrder(input: OrderInput): Promise<Order> {
       input.pool,
       input.worker,
       input.requestedProvider,
+      input.nhRequestedMode ?? null,
       input.user,
       'payment_required',
       input.totalUsd,
@@ -76,6 +79,7 @@ export async function createOrder(input: OrderInput): Promise<Order> {
     pool: input.pool,
     worker: input.worker,
     requestedProvider: input.requestedProvider,
+    nhRequestedMode: input.nhRequestedMode,
     user: input.user,
     status: 'payment_required',
     totalUsd: input.totalUsd,

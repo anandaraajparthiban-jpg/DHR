@@ -43,6 +43,7 @@ function normalizeRowKeys<T>(row: any): T {
   if ('expiresat' in row && !('expiresAt' in row)) row.expiresAt = row.expiresat;
   if ('confirmedat' in row && !('confirmedAt' in row)) row.confirmedAt = row.confirmedat;
   if ('requestedprovider' in row && !('requestedProvider' in row)) row.requestedProvider = row.requestedprovider;
+  if ('nhrequestedmode' in row && !('nhRequestedMode' in row)) row.nhRequestedMode = row.nhrequestedmode;
   if ('totalusd' in row && !('totalUsd' in row)) row.totalUsd = row.totalusd;
   if ('nhorderid' in row && !('nhOrderId' in row)) row.nhOrderId = row.nhorderid;
   if ('nhmarket' in row && !('nhMarket' in row)) row.nhMarket = row.nhmarket;
@@ -176,6 +177,7 @@ const migrations = [
     pool TEXT NOT NULL,
     worker TEXT NOT NULL,
     "requestedProvider" TEXT,
+    "nhRequestedMode" TEXT,
     "user" TEXT NOT NULL,
     status TEXT NOT NULL,
     "totalUsd" DOUBLE PRECISION NOT NULL,
@@ -250,6 +252,7 @@ const orderUpgradeCols: Array<[string, string]> = [
   ['nhPriceFactor', 'TEXT'],
   ['expiresAt', 'BIGINT'],
   ['requestedProvider', 'TEXT'],
+  ['nhRequestedMode', 'TEXT'],
   ['fulfillmentProvider', 'TEXT'],
 ];
 
