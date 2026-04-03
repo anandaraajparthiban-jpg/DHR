@@ -24,7 +24,7 @@ It also shows how to preview payloads before placing live orders.
 ## `business_fixed_duration`
 - Endpoint: `POST /main/api/v2/hashpower/business/order`
 - Bot computes `endTs` from requested `hours`.
-- Bot sends `subType: "BUSINESS_FIXED_DURATION"` first, then auto-fallbacks to `BUSINESS_FIXED_SPEED` if subtype validation fails.
+- Bot sends `subType: "BUSINESS_FIXED_DURATION"` only.
 - Includes `amount`, `limit`, `endTs`, and `bottomLimit` (env override or minimum speed).
 
 ## 2) Environment Variables
@@ -42,13 +42,12 @@ Business options:
 NICEHASH_BUSINESS_BOTTOM_LIMIT_EH=
 
 # For business_fixed_duration
-NICEHASH_BUSINESS_DURATION_SUBTYPE=BUSINESS_FIXED_DURATION
 NICEHASH_BUSINESS_DURATION_MIN_END_SEC=900
 ```
 
 Notes:
 - `NICEHASH_BUSINESS_DURATION_MIN_END_SEC` default is `900` (15 minutes).
-- If `NICEHASH_BUSINESS_BOTTOM_LIMIT_EH` is not set in duration mode, bot uses algorithm min speed (or `limit` fallback).
+- If `NICEHASH_BUSINESS_BOTTOM_LIMIT_EH` is not set in duration mode, bot uses algorithm min speed (or `limit` if algorithm minimum is unavailable).
 
 ## 3) Recommended Dry-Run Before Live Orders
 
@@ -78,7 +77,7 @@ Admin command:
 /nh_payload_preview ph:<num> hours:<num> pool:<url> worker:<btc_address> resolve_pool_id:<true|false>
 ```
 
-- Returns request candidate payload(s) as JSON.
+- Returns request payload candidate as JSON.
 - Does not place an order.
 - Useful for confirming mode, subtype, factors, `endTs`, and `bottomLimit`.
 
@@ -129,11 +128,10 @@ Expected candidate:
 - `subType: "BUSINESS_FIXED_SPEED"`
 - Includes `limit`, `amount`, and `bottomLimit` when configured.
 
-## Example C: Business Fixed Duration (with fallback)
+## Example C: Business Fixed Duration
 
 ```env
 NICEHASH_ORDER_MODE=business_fixed_duration
-NICEHASH_BUSINESS_DURATION_SUBTYPE=BUSINESS_FIXED_DURATION
 NICEHASH_BUSINESS_DURATION_MIN_END_SEC=900
 ```
 
@@ -143,15 +141,14 @@ Preview:
 npm run nh:dry-run -- --ph 25 --hours 24 --pool stratum+tcp://pool.example.com:3333 --worker bc1q...
 ```
 
-Expected candidates:
-- Candidate 1: `subType: "BUSINESS_FIXED_DURATION"`
-- Candidate 2: `subType: "BUSINESS_FIXED_SPEED"` (fallback)
-- Both include `endTs` and `bottomLimit`.
+Expected candidate:
+- One request with `subType: "BUSINESS_FIXED_DURATION"`.
+- Includes `endTs` and `bottomLimit`.
 
 Live placement behavior:
-- Bot tries candidate 1 first.
-- On subtype-validation-style `400` failure, bot retries with candidate 2.
-- After create, bot reads order details from NiceHash and normalizes persisted metadata with server values.
+- Bot sends only the selected mode payload (no cross-mode fallback).
+- If NiceHash rejects the request, bot returns the error.
+- After successful create, bot reads order details from NiceHash and normalizes persisted metadata with server values.
 
 ## 6) Operational Notes
 

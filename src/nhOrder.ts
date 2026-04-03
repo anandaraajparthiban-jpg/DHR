@@ -74,11 +74,6 @@ export function resolveNhOrderMode(override?: string): NhOrderMode {
   return 'standard';
 }
 
-function resolveBusinessDurationSubtypePreference(): string {
-  const raw = (process.env.NICEHASH_BUSINESS_DURATION_SUBTYPE ?? 'BUSINESS_FIXED_DURATION').trim().toUpperCase();
-  return raw || 'BUSINESS_FIXED_DURATION';
-}
-
 function resolveBusinessDurationMinEndSec(): number {
   const raw = Number(process.env.NICEHASH_BUSINESS_DURATION_MIN_END_SEC ?? '900');
   if (!isFinite(raw) || raw <= 0) return 900;
@@ -167,18 +162,6 @@ function validateBusinessDurationGuardrails(hours: number): void {
       `Business duration order end window ${requestedSec}s is below minimum ${minEndSec}s (NICEHASH_BUSINESS_DURATION_MIN_END_SEC).`
     );
   }
-}
-
-function isDurationSubtypeFallbackCandidateError(message: string): boolean {
-  // NiceHash can return generic "Malformed request" for unsupported duration subtype payloads.
-  // Retry once with a fixed-speed-compatible payload whenever the duration attempt returns HTTP 400.
-  return message.includes('http 400');
-}
-
-function isRetryableCreateCandidateError(message: string): boolean {
-  // Candidate fallback variants only target request-shape constraints and allocation edge cases.
-  // Keep retries scoped to HTTP 400 failures.
-  return message.includes('http 400');
 }
 
 function extractNhErrorCodes(message: string): number[] {
@@ -324,43 +307,16 @@ async function buildNhOrderPlacementPlan(opts: NhOrderInput, options: BuildNhOrd
 
   const requestCandidates: NhOrderRequestCandidate[] =
     orderType === 'business'
-      ? (() => {
-          const candidates: NhOrderRequestCandidate[] = [];
-          const requestedSubType =
-            orderMode === 'business_fixed_duration' ? resolveBusinessDurationSubtypePreference() : 'BUSINESS_FIXED_SPEED';
-          candidates.push({
+      ? [
+          {
             endpoint,
-            subType: requestedSubType,
-            payload: { ...payload, subType: requestedSubType },
-          });
-          if (orderMode === 'business_fixed_duration' && requestedSubType !== 'BUSINESS_FIXED_SPEED') {
-            const speedFallbackPayload: Record<string, unknown> = { ...payload, subType: 'BUSINESS_FIXED_SPEED' };
-            delete speedFallbackPayload.endTs;
-            candidates.push({
-              endpoint,
-              subType: 'BUSINESS_FIXED_SPEED',
-              payload: speedFallbackPayload,
-            });
-            if ('bottomLimit' in speedFallbackPayload) {
-              const speedNoBottomPayload: Record<string, unknown> = { ...speedFallbackPayload };
-              delete speedNoBottomPayload.bottomLimit;
-              candidates.push({
-                endpoint,
-                subType: 'BUSINESS_FIXED_SPEED',
-                payload: speedNoBottomPayload,
-              });
-            }
-          } else if ('bottomLimit' in payload) {
-            const speedNoBottomPayload: Record<string, unknown> = { ...payload, subType: 'BUSINESS_FIXED_SPEED' };
-            delete speedNoBottomPayload.bottomLimit;
-            candidates.push({
-              endpoint,
-              subType: 'BUSINESS_FIXED_SPEED',
-              payload: speedNoBottomPayload,
-            });
-          }
-          return candidates;
-        })()
+            subType: orderMode === 'business_fixed_duration' ? 'BUSINESS_FIXED_DURATION' : 'BUSINESS_FIXED_SPEED',
+            payload: {
+              ...payload,
+              subType: orderMode === 'business_fixed_duration' ? 'BUSINESS_FIXED_DURATION' : 'BUSINESS_FIXED_SPEED',
+            },
+          },
+        ]
       : [
           {
             endpoint,
@@ -448,7 +404,6 @@ function warnOrderMismatch(orderId: string, field: string, requested: string | n
 export async function createNhOrder(opts: NhOrderInput): Promise<NhOrderResult> {
   const plan = await buildNhOrderPlacementPlan(opts, { resolvePoolId: true });
   let data: any;
-  let lastErr: string | undefined;
   let chosenSubType: string | undefined;
   for (let i = 0; i < plan.requestCandidates.length; i++) {
     const candidate = plan.requestCandidates[i];
@@ -458,25 +413,14 @@ export async function createNhOrder(opts: NhOrderInput): Promise<NhOrderResult> 
       break;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      lastErr = msg;
-      const canFallback =
-        i < plan.requestCandidates.length - 1 &&
-        ((plan.mode === 'business_fixed_duration' &&
-          i === 0 &&
-          candidate.subType === 'BUSINESS_FIXED_DURATION' &&
-          plan.requestCandidates[i + 1]?.subType === 'BUSINESS_FIXED_SPEED' &&
-          isDurationSubtypeFallbackCandidateError(msg)) ||
-          isRetryableCreateCandidateError(msg));
-      if (!canFallback) {
-        throw new Error(formatNhCreateFailure(candidate.endpoint, candidate.payload, msg));
-      }
+      throw new Error(formatNhCreateFailure(candidate.endpoint, candidate.payload, msg));
     }
   }
   if (!data) {
     const first = plan.requestCandidates[0];
     const endpoint = first?.endpoint ?? '/main/api/v2/hashpower/order';
     const payload = (first?.payload ?? {}) as Record<string, unknown>;
-    throw new Error(formatNhCreateFailure(endpoint, payload, lastErr ?? 'unknown error'));
+    throw new Error(formatNhCreateFailure(endpoint, payload, 'unknown error'));
   }
   const id = data?.id ?? data?.orderId;
   if (!id) throw new Error('order create missing id');
