@@ -1,10 +1,11 @@
 # NiceHash Business Mode Guide
 
-This guide explains how to run DHR with the three NiceHash order modes:
+This guide explains NiceHash order behavior in DHR.
 
-- `standard`
+Default runtime flow is automatic:
 - `business_fixed_speed`
 - `business_fixed_duration`
+- `standard` orderbook fallback
 
 It also shows how to preview payloads before placing live orders.
 
@@ -32,7 +33,7 @@ It also shows how to preview payloads before placing live orders.
 Set in `.env`:
 
 ```env
-NICEHASH_ORDER_MODE=standard
+NICEHASH_ORDER_MODE=auto
 ```
 
 Business options:
@@ -81,41 +82,18 @@ Admin command:
 - Does not place an order.
 - Useful for confirming mode, subtype, factors, `endTs`, and `bottomLimit`.
 
-## 4.1) User-Facing Mode Selection
+## 4.1) User-Facing Input
 
-Users can choose mode per request in Discord:
+Users provide only:
 
 ```text
-/quote ph:<num> hours:<num> order_mode:<standard|business_fixed_speed|business_fixed_duration>
-/rent ph:<num> hours:<num> pool:<url> worker:<btc_address> order_mode:<standard|business_fixed_speed|business_fixed_duration>
+/quote ph:<num> hours:<num>
+/rent ph:<num> hours:<num> pool:<url> worker:<btc_address>
 ```
 
-If `order_mode` is omitted, bot uses operator default `NICEHASH_ORDER_MODE`.
+Runtime order flow is automatic (`business_fixed_speed` -> `business_fixed_duration` -> `standard`).
 
-## 5) Mode-Specific Examples
-
-## Example A: Standard
-
-```env
-NICEHASH_ORDER_MODE=standard
-```
-
-Preview:
-
-```bash
-npm run nh:dry-run -- --ph 2 --hours 24 --pool stratum+tcp://pool.example.com:3333 --worker bc1q...
-```
-
-Expected candidate:
-- One request to `/main/api/v2/hashpower/order`
-- Payload includes `type: "STANDARD"` and `price`.
-
-## Example B: Business Fixed Speed
-
-```env
-NICEHASH_ORDER_MODE=business_fixed_speed
-NICEHASH_BUSINESS_BOTTOM_LIMIT_EH=0.02
-```
+## 5) Fallback Sequence Example
 
 Preview:
 
@@ -123,37 +101,20 @@ Preview:
 npm run nh:dry-run -- --ph 25 --hours 24 --pool stratum+tcp://pool.example.com:3333 --worker bc1q...
 ```
 
-Expected candidate:
-- One request to `/main/api/v2/hashpower/business/order`
-- `subType: "BUSINESS_FIXED_SPEED"`
-- Includes `limit`, `amount`, and `bottomLimit` when configured.
-
-## Example C: Business Fixed Duration
-
-```env
-NICEHASH_ORDER_MODE=business_fixed_duration
-NICEHASH_BUSINESS_DURATION_MIN_END_SEC=900
-```
-
-Preview:
-
-```bash
-npm run nh:dry-run -- --ph 25 --hours 24 --pool stratum+tcp://pool.example.com:3333 --worker bc1q...
-```
-
-Expected candidate:
-- One request with `type: "BUSINESS"` (no subtype).
-- Includes `endTs` and `bottomLimit`.
+Expected candidate sequence:
+- First request: `/main/api/v2/hashpower/business/order` with `subType: "BUSINESS_FIXED_SPEED"`.
+- Second request: `/main/api/v2/hashpower/business/order` with `type: "BUSINESS"` and `endTs`.
+- Third request: `/main/api/v2/hashpower/order` with `type: "STANDARD"` (orderbook fallback).
 
 Live placement behavior:
-- Bot sends only the selected mode payload (no cross-mode fallback).
-- If NiceHash rejects the request, bot returns the error.
+- Bot tries candidates in this fixed order: speed -> duration -> standard.
+- It proceeds to the next candidate only when the previous candidate is rejected.
 - After successful create, bot reads order details from NiceHash and normalizes persisted metadata with server values.
 
 ## 6) Operational Notes
 
-- Startup log shows current mode: `NiceHash order mode: ...`.
-- For duration mode, very short requests fail fast if below `NICEHASH_BUSINESS_DURATION_MIN_END_SEC`.
+- Startup log shows auto fallback mode.
+- For very short requests, duration candidate can be skipped if below `NICEHASH_BUSINESS_DURATION_MIN_END_SEC`; fallback still continues.
 - Order metadata persisted in DB now includes:
   - `nhOrderType`
   - `nhSubType`
