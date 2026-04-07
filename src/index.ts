@@ -189,18 +189,18 @@ const commands = [
     .setDescription('Place fixed-speed business order request (payment first, then business->standard)')
     .addNumberOption((opt) => opt.setName('amount').setDescription('Order amount in BTC').setRequired(true))
     .addNumberOption((opt) => opt.setName('limit_th').setDescription('Speed limit in TH/s').setRequired(true))
-    .addNumberOption((opt) => opt.setName('bottom_limit_th').setDescription('Optional bottom limit in TH/s').setRequired(false))
     .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL, e.g. stratum+tcp://host:3334').setRequired(true))
-    .addStringOption((opt) => opt.setName('worker').setDescription('BTC address / worker').setRequired(true)),
+    .addStringOption((opt) => opt.setName('worker').setDescription('BTC address / worker').setRequired(true))
+    .addNumberOption((opt) => opt.setName('bottom_limit_th').setDescription('Optional bottom limit in TH/s').setRequired(false)),
   new SlashCommandBuilder()
     .setName('rent-with-fixed-duration')
     .setDescription('Place fixed-duration business order request (payment first, then business->standard)')
     .addNumberOption((opt) => opt.setName('amount').setDescription('Order amount in BTC').setRequired(true))
     .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72))
-    .addNumberOption((opt) => opt.setName('bottom_limit_th').setDescription('Optional bottom limit in TH/s').setRequired(false))
-    .addNumberOption((opt) => opt.setName('limit_th').setDescription('Optional speed cap in TH/s').setRequired(false))
     .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL, e.g. stratum+tcp://host:3334').setRequired(true))
     .addStringOption((opt) => opt.setName('worker').setDescription('BTC address / worker').setRequired(true))
+    .addNumberOption((opt) => opt.setName('bottom_limit_th').setDescription('Optional bottom limit in TH/s').setRequired(false))
+    .addNumberOption((opt) => opt.setName('limit_th').setDescription('Optional speed cap in TH/s').setRequired(false))
     .addStringOption((opt) =>
       opt
         .setName('variant')
