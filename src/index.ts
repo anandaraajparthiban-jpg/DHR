@@ -1,5 +1,6 @@
 // index.ts — Discord bot main:
-// - Registers slash commands (/quote, /rent, /rent-with-fixed-speed, /rent-with-fixed-duration, /status, /time_left, /cancel, /payment_status, /mark_paid, /verify_payments, /verify_payments_debug, /nh_payload_preview, /finance_summary).
+// - Registers slash commands (/quote, /rent-with-fixed-speed, /rent-with-fixed-duration, /status, /time_left, /cancel, /payment_status, /mark_paid, /verify_payments, /verify_payments_debug, /nh_payload_preview, /finance_summary).
+// - Legacy /rent can be re-enabled via SHOW_LEGACY_RENT_COMMAND=true.
 // - /rent collects pool + worker, creates payment intent, and waits for payment.
 // - On payment confirmation, orders can auto-activate; admin can still trigger /mark_paid manually.
 // - Fulfillment uses NiceHash only.
@@ -95,6 +96,30 @@ interface ResolvedLoginCredential {
   dbUserId?: string;
 }
 
+type NhDirectOrderKind = 'direct_fixed_speed' | 'direct_fixed_duration';
+
+interface NhDirectFixedSpeedConfig {
+  kind: 'direct_fixed_speed';
+  amount: number;
+  limitEh: number;
+  bottomLimitEh?: number;
+  market?: string;
+  poolId?: string;
+}
+
+interface NhDirectFixedDurationConfig {
+  kind: 'direct_fixed_duration';
+  amount: number;
+  hours: number;
+  limitEh?: number;
+  bottomLimitEh?: number;
+  market?: string;
+  poolId?: string;
+  variant?: NhBusinessDurationVariant;
+}
+
+type NhDirectOrderConfig = NhDirectFixedSpeedConfig | NhDirectFixedDurationConfig;
+
 class ApiHttpError extends Error {
   statusCode: number;
   errorCode: string;
@@ -136,9 +161,11 @@ const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 const BECH32_MAP = new Map(BECH32_CHARSET.split('').map((c, i) => [c, i]));
 const BECH32M_CONST = 0x2bc830a3;
 const TH_PER_EH = 1_000_000;
+const SHOW_LEGACY_RENT_COMMAND = (process.env.SHOW_LEGACY_RENT_COMMAND ?? 'false').toLowerCase() === 'true';
 
 console.log(`Routing config: NiceHash only, minimum start ${NICEHASH_MIN_START_AMOUNT_BTC.toFixed(8)} BTC`);
 console.log('NiceHash order mode: auto (business fixed speed -> business fixed duration -> standard fallback)');
+console.log(`Legacy /rent command visibility: ${SHOW_LEGACY_RENT_COMMAND ? 'enabled' : 'hidden'}`);
 
 const commands = [
   new SlashCommandBuilder()
@@ -146,53 +173,34 @@ const commands = [
     .setDescription('Get a hashrate quote')
     .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
     .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72)),
-  new SlashCommandBuilder()
-    .setName('rent')
-    .setDescription('Place a hashrate rental')
-    .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
-    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72))
-    .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL').setRequired(true))
-    .addStringOption((opt) => opt.setName('worker').setDescription('BTC address only (no suffix)').setRequired(true)),
+  ...(SHOW_LEGACY_RENT_COMMAND
+    ? [
+        new SlashCommandBuilder()
+          .setName('rent')
+          .setDescription('Place a hashrate rental')
+          .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
+          .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72))
+          .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL').setRequired(true))
+          .addStringOption((opt) => opt.setName('worker').setDescription('BTC address only (no suffix)').setRequired(true)),
+      ]
+    : []),
   new SlashCommandBuilder()
     .setName('rent-with-fixed-speed')
-    .setDescription('Admin: place fixed-speed business order, then fallback to standard')
+    .setDescription('Place fixed-speed business order request (payment first, then business->standard)')
     .addNumberOption((opt) => opt.setName('amount').setDescription('Order amount in BTC').setRequired(true))
-    .addNumberOption((opt) => opt.setName('limit_th').setDescription('Speed limit in TH/s').setRequired(false))
-    .addNumberOption((opt) => opt.setName('limit_eh').setDescription('Speed limit in EH/s').setRequired(false))
+    .addNumberOption((opt) => opt.setName('limit_th').setDescription('Speed limit in TH/s').setRequired(true))
     .addNumberOption((opt) => opt.setName('bottom_limit_th').setDescription('Optional bottom limit in TH/s').setRequired(false))
-    .addNumberOption((opt) => opt.setName('bottom_limit_eh').setDescription('Optional bottom limit in EH/s').setRequired(false))
-    .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL, e.g. stratum+tcp://host:3334').setRequired(false))
-    .addStringOption((opt) => opt.setName('worker').setDescription('BTC address / worker').setRequired(false))
-    .addStringOption((opt) => opt.setName('pool_id').setDescription('Existing NiceHash poolId').setRequired(false))
-    .addStringOption((opt) =>
-      opt
-        .setName('market')
-        .setDescription('NiceHash market')
-        .setRequired(false)
-        .addChoices({ name: 'EU', value: 'EU' }, { name: 'USA', value: 'USA' })
-    )
-    .addBooleanOption((opt) =>
-      opt.setName('cancel_after_create').setDescription('If true, cancel immediately after successful create')
-    ),
+    .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL, e.g. stratum+tcp://host:3334').setRequired(true))
+    .addStringOption((opt) => opt.setName('worker').setDescription('BTC address / worker').setRequired(true)),
   new SlashCommandBuilder()
     .setName('rent-with-fixed-duration')
-    .setDescription('Admin: place fixed-duration business order, then fallback to standard')
+    .setDescription('Place fixed-duration business order request (payment first, then business->standard)')
     .addNumberOption((opt) => opt.setName('amount').setDescription('Order amount in BTC').setRequired(true))
-    .addNumberOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true))
+    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72))
     .addNumberOption((opt) => opt.setName('bottom_limit_th').setDescription('Optional bottom limit in TH/s').setRequired(false))
-    .addNumberOption((opt) => opt.setName('bottom_limit_eh').setDescription('Optional bottom limit in EH/s').setRequired(false))
     .addNumberOption((opt) => opt.setName('limit_th').setDescription('Optional speed cap in TH/s').setRequired(false))
-    .addNumberOption((opt) => opt.setName('limit_eh').setDescription('Optional speed cap in EH/s').setRequired(false))
-    .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL, e.g. stratum+tcp://host:3334').setRequired(false))
-    .addStringOption((opt) => opt.setName('worker').setDescription('BTC address / worker').setRequired(false))
-    .addStringOption((opt) => opt.setName('pool_id').setDescription('Existing NiceHash poolId').setRequired(false))
-    .addStringOption((opt) =>
-      opt
-        .setName('market')
-        .setDescription('NiceHash market')
-        .setRequired(false)
-        .addChoices({ name: 'EU', value: 'EU' }, { name: 'USA', value: 'USA' })
-    )
+    .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL, e.g. stratum+tcp://host:3334').setRequired(true))
+    .addStringOption((opt) => opt.setName('worker').setDescription('BTC address / worker').setRequired(true))
     .addStringOption((opt) =>
       opt
         .setName('variant')
@@ -206,9 +214,6 @@ const commands = [
           { name: 'Type=BUSINESS_ENGINE + duration + endTs', value: 'business_engine_duration_endts' },
           { name: 'Type=BUSINESS_ENGINE + subType + duration + endTs', value: 'business_engine_subtype_duration_endts' }
         )
-    )
-    .addBooleanOption((opt) =>
-      opt.setName('cancel_after_create').setDescription('If true, cancel immediately after successful create')
     ),
   new SlashCommandBuilder()
     .setName('status')
@@ -705,6 +710,72 @@ function nhOrderModeLabel(mode: NhOrderMode): string {
   return 'Standard';
 }
 
+function requestedOrderModeLabel(raw?: string): string {
+  const normalized = String(raw || '').trim().toLowerCase();
+  if (normalized === 'direct_fixed_speed') return 'Direct Fixed Speed (business -> standard fallback)';
+  if (normalized === 'direct_fixed_duration') return 'Direct Fixed Duration (business -> standard fallback)';
+  return nhOrderModeLabel(resolveNhOrderMode(raw));
+}
+
+function parseNhDirectOrderConfig(raw?: string): NhDirectOrderConfig | undefined {
+  if (!raw || !raw.trim()) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  const obj = parsed as Record<string, unknown>;
+  if (obj.kind === 'direct_fixed_speed') {
+    const amount = Number(obj.amount);
+    const limitEh = Number(obj.limitEh);
+    if (!isFinite(amount) || amount <= 0 || !isFinite(limitEh) || limitEh <= 0) return undefined;
+    const cfg: NhDirectFixedSpeedConfig = {
+      kind: 'direct_fixed_speed',
+      amount,
+      limitEh,
+    };
+    if (isFinite(Number(obj.bottomLimitEh))) cfg.bottomLimitEh = Number(obj.bottomLimitEh);
+    if (typeof obj.market === 'string' && obj.market.trim()) cfg.market = obj.market.trim().toUpperCase();
+    if (typeof obj.poolId === 'string' && obj.poolId.trim()) cfg.poolId = obj.poolId.trim();
+    return cfg;
+  }
+  if (obj.kind === 'direct_fixed_duration') {
+    const amount = Number(obj.amount);
+    const hours = Number(obj.hours);
+    if (!isFinite(amount) || amount <= 0 || !isFinite(hours) || hours <= 0) return undefined;
+    const cfg: NhDirectFixedDurationConfig = {
+      kind: 'direct_fixed_duration',
+      amount,
+      hours,
+    };
+    if (isFinite(Number(obj.limitEh))) cfg.limitEh = Number(obj.limitEh);
+    if (isFinite(Number(obj.bottomLimitEh))) cfg.bottomLimitEh = Number(obj.bottomLimitEh);
+    if (typeof obj.market === 'string' && obj.market.trim()) cfg.market = obj.market.trim().toUpperCase();
+    if (typeof obj.poolId === 'string' && obj.poolId.trim()) cfg.poolId = obj.poolId.trim();
+    const variant = parseDurationVariantInput(obj.variant);
+    if (variant) cfg.variant = variant;
+    return cfg;
+  }
+  return undefined;
+}
+
+function estimateExpiryFromNhOrder(nh: { amount: number; limit: number; price: number; endTs?: string }, fallbackHours: number): number {
+  const now = Date.now();
+  if (nh.endTs) {
+    const endMs = Date.parse(nh.endTs);
+    if (isFinite(endMs) && endMs > now) return endMs;
+  }
+  if (isFinite(nh.amount) && nh.amount > 0 && isFinite(nh.limit) && nh.limit > 0 && isFinite(nh.price) && nh.price > 0) {
+    const estimatedHours = (nh.amount / (nh.price * nh.limit)) * 24;
+    const boundedHours = Math.max(0.25, Math.min(24 * 30, estimatedHours));
+    return now + boundedHours * 3600 * 1000;
+  }
+  const safeFallback = isFinite(fallbackHours) && fallbackHours > 0 ? fallbackHours : 24;
+  return now + safeFallback * 3600 * 1000;
+}
+
 function nhOrderModeBehavior(mode: NhOrderMode): string {
   if (mode === 'auto') {
     return 'Try Business Fixed Speed first, then Business Fixed Duration, then Standard orderbook fallback.';
@@ -738,23 +809,6 @@ function parseDurationVariantInput(raw: unknown): NhBusinessDurationVariant | un
 function ehFromTh(th: number): number {
   if (!isFinite(th) || th <= 0) throw new Error(`TH/s value must be > 0. Received ${th}.`);
   return th / TH_PER_EH;
-}
-
-function resolveEhFromEither(input: { eh?: number | null; th?: number | null; label: string; required?: boolean }): number | undefined {
-  const hasEh = typeof input.eh === 'number';
-  const hasTh = typeof input.th === 'number';
-  if (hasEh && hasTh) {
-    throw new Error(`Provide only one of ${input.label}_eh or ${input.label}_th.`);
-  }
-  if (!hasEh && !hasTh) {
-    if (input.required) throw new Error(`Missing ${input.label}. Provide ${input.label}_eh or ${input.label}_th.`);
-    return undefined;
-  }
-  const raw = hasEh ? Number(input.eh) : ehFromTh(Number(input.th));
-  if (!isFinite(raw) || raw <= 0) {
-    throw new Error(`${input.label} must be > 0.`);
-  }
-  return raw;
 }
 
 function parseClaimSet(value: unknown): Set<string> {
@@ -1154,6 +1208,7 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
   const o = await getOrder(orderId);
   if (!o) throw new Error('Not found');
   const selectedProvider: FulfillmentProvider = DEFAULT_FULFILLMENT_PROVIDER;
+  const requestedModeRaw = String(o.nhRequestedMode || '').trim().toLowerCase();
   const effectiveOrderMode = resolveNhOrderMode(o.nhRequestedMode);
 
   if (requirePaymentConfirmed) {
@@ -1163,16 +1218,58 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
     }
   }
 
-  let expiresAt = Date.now() + o.hours * 3600 * 1000;
-  const usdPerPhDay = await latestBaseUsdPerPhDay(o);
-  const nh = await createNhOrder({
-    ph: o.ph,
-    hours: o.hours,
-    poolUrl: o.pool,
-    worker: o.worker,
-    usdPerPhDay,
-    orderMode: effectiveOrderMode,
-  });
+  let nh: Awaited<ReturnType<typeof createNhOrder>>;
+  let chosenModeLabel = nhOrderModeLabel(effectiveOrderMode);
+  let placedFailures: string[] = [];
+  if (requestedModeRaw === 'direct_fixed_speed') {
+    const cfg = parseNhDirectOrderConfig(o.nhDirectConfig);
+    if (!cfg || cfg.kind !== 'direct_fixed_speed') {
+      throw new Error('Direct fixed speed order missing/invalid nhDirectConfig.');
+    }
+    const direct = await createNhDirectFixedSpeedThenStandard({
+      market: cfg.market,
+      amount: cfg.amount,
+      limitEh: cfg.limitEh,
+      bottomLimitEh: cfg.bottomLimitEh,
+      poolId: cfg.poolId,
+      poolUrl: o.pool,
+      worker: o.worker,
+    });
+    nh = direct.order;
+    chosenModeLabel = nhOrderModeLabel(direct.chosenMode);
+    placedFailures = direct.failures;
+  } else if (requestedModeRaw === 'direct_fixed_duration') {
+    const cfg = parseNhDirectOrderConfig(o.nhDirectConfig);
+    if (!cfg || cfg.kind !== 'direct_fixed_duration') {
+      throw new Error('Direct fixed duration order missing/invalid nhDirectConfig.');
+    }
+    const direct = await createNhDirectFixedDurationThenStandard({
+      market: cfg.market,
+      amount: cfg.amount,
+      hours: cfg.hours,
+      limitEh: cfg.limitEh,
+      bottomLimitEh: cfg.bottomLimitEh,
+      variant: cfg.variant,
+      poolId: cfg.poolId,
+      poolUrl: o.pool,
+      worker: o.worker,
+    });
+    nh = direct.order;
+    chosenModeLabel = nhOrderModeLabel(direct.chosenMode);
+    placedFailures = direct.failures;
+  } else {
+    const usdPerPhDay = await latestBaseUsdPerPhDay(o);
+    nh = await createNhOrder({
+      ph: o.ph,
+      hours: o.hours,
+      poolUrl: o.pool,
+      worker: o.worker,
+      usdPerPhDay,
+      orderMode: effectiveOrderMode,
+    });
+  }
+
+  const expiresAt = estimateExpiryFromNhOrder(nh, o.hours);
   await saveNhInfo(orderId, {
     nhOrderId: nh.id,
     nhMarket: nh.market,
@@ -1186,7 +1283,7 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
     nhMarketFactor: nh.marketFactor,
     nhPriceFactor: nh.priceFactor,
   });
-  const placed =
+  const placedBase =
     nh.orderType === 'business'
       ? `NiceHash business order placed: ${nh.id} (market ${nh.market}, subtype ${nh.subType ?? 'n/a'}, limit ${nh.limit.toFixed(
           6
@@ -1194,6 +1291,8 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
           nh.endTs ? `, endTs ${nh.endTs}` : ''
         }, amount ${nh.amount.toFixed(8)} BTC).`
       : `NiceHash order placed: ${nh.id} (market ${nh.market}, price ${nh.price.toFixed(8)} BTC/EH/day, limit ${nh.limit.toFixed(6)} EH/s).`;
+  const placed =
+    placedFailures.length > 0 ? `${placedBase}\nFallback details: ${placedFailures[0]}` : placedBase;
 
   await updateExpiry(orderId, expiresAt);
   const msg = await markPaid(orderId);
@@ -1204,7 +1303,9 @@ async function fulfillOrder(orderId: string, requirePaymentConfirmed: boolean): 
     o.user,
     `Your DHR order ${orderId} is now active.\nProvider: ${providerLabel(
       refreshed?.fulfillmentProvider ?? selectedProvider
-    )}\nMode: ${nhOrderModeLabel(effectiveOrderMode)}\nPool: ${o.pool}\nWorker: ${o.worker}\nEnds: ${new Date(expiresAt).toISOString()}`
+    )}\nMode: ${requestedOrderModeLabel(o.nhRequestedMode)} (placed as ${chosenModeLabel})\nPool: ${o.pool}\nWorker: ${o.worker}\nEnds: ${new Date(
+      expiresAt
+    ).toISOString()}`
   );
 
   return `${msg}\n${placed}`;
@@ -2107,39 +2208,20 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
 }
 
 async function handleRentWithFixedSpeed(interaction: ChatInputCommandInteraction) {
-  if (!isAdmin(interaction.user.id)) {
-    await interaction.reply({ content: 'Admins only.', ephemeral: true });
-    return;
-  }
-
   const amount = interaction.options.getNumber('amount', true);
   if (!isFinite(amount) || amount <= 0) {
     await interaction.reply({ content: 'Amount must be > 0 BTC.', ephemeral: true });
     return;
   }
 
-  const market = (interaction.options.getString('market') ?? 'EU').toUpperCase();
-  const poolId = interaction.options.getString('pool_id') ?? undefined;
-  const pool = interaction.options.getString('pool') ?? undefined;
-  const worker = interaction.options.getString('worker') ?? undefined;
-  const cancelAfterCreate = interaction.options.getBoolean('cancel_after_create') ?? false;
-
-  if (!poolId && (!pool || !worker)) {
-    await interaction.reply({
-      content: 'Provide either `pool_id`, or both `pool` and `worker`.',
-      ephemeral: true,
-    });
+  const pool = interaction.options.getString('pool', true);
+  const worker = interaction.options.getString('worker', true);
+  const poolOk = validatePool(pool);
+  if (!poolOk.valid) {
+    await interaction.reply({ content: `Pool not allowed: ${poolOk.reason}`, ephemeral: true });
     return;
   }
-
-  if (pool) {
-    const poolOk = validatePool(pool);
-    if (!poolOk.valid) {
-      await interaction.reply({ content: `Pool not allowed: ${poolOk.reason}`, ephemeral: true });
-      return;
-    }
-  }
-  if (worker && !isValidWorkerName(worker)) {
+  if (!isValidWorkerName(worker)) {
     await interaction.reply({
       content: 'Worker must be a valid BTC mainnet address only (no suffix like `.worker`, no dots).',
       ephemeral: true,
@@ -2150,17 +2232,9 @@ async function handleRentWithFixedSpeed(interaction: ChatInputCommandInteraction
   let limitEh: number;
   let bottomLimitEh: number | undefined;
   try {
-    limitEh = resolveEhFromEither({
-      eh: interaction.options.getNumber('limit_eh'),
-      th: interaction.options.getNumber('limit_th'),
-      label: 'limit',
-      required: true,
-    })!;
-    bottomLimitEh = resolveEhFromEither({
-      eh: interaction.options.getNumber('bottom_limit_eh'),
-      th: interaction.options.getNumber('bottom_limit_th'),
-      label: 'bottom_limit',
-    });
+    limitEh = ehFromTh(interaction.options.getNumber('limit_th', true));
+    const bottomLimitTh = interaction.options.getNumber('bottom_limit_th');
+    bottomLimitEh = typeof bottomLimitTh === 'number' ? ehFromTh(bottomLimitTh) : undefined;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await interaction.reply({ content: `Input error: ${msg}`, ephemeral: true });
@@ -2168,56 +2242,65 @@ async function handleRentWithFixedSpeed(interaction: ChatInputCommandInteraction
   }
 
   try {
-    const result = await createNhDirectFixedSpeedThenStandard({
-      market,
+    const btcPrice = await btcUsd();
+    if (!isFinite(btcPrice) || btcPrice <= 0) {
+      throw new Error('BTC price unavailable; unable to create payment intent right now.');
+    }
+    const totalUsd = Number((amount * btcPrice).toFixed(6));
+    const configuredHours = Number(process.env.NH_DIRECT_SPEED_ORDER_HOURS ?? '24');
+    const hoursForOrder = isFinite(configuredHours) ? Math.min(72, Math.max(1, Math.round(configuredHours))) : 24;
+    const phFromLimit = limitEh * 1000;
+    const directConfig: NhDirectFixedSpeedConfig = {
+      kind: 'direct_fixed_speed',
       amount,
       limitEh,
       bottomLimitEh,
-      poolId,
-      poolUrl: pool,
+    };
+
+    const order = await createOrder({
+      ph: phFromLimit,
+      hours: hoursForOrder,
+      pool,
       worker,
+      requestedProvider: DEFAULT_FULFILLMENT_PROVIDER,
+      nhRequestedMode: 'direct_fixed_speed',
+      nhDirectConfig: JSON.stringify(directConfig),
+      user: interaction.user.id,
+      totalUsd,
+    });
+    const payment = await ensurePaymentIntent({
+      orderId: order.id,
+      userId: interaction.user.id,
+      totalUsd: order.totalUsd,
+      btcUsd: btcPrice,
+      expiresAt: order.expiresAt ?? Date.now() + hoursForOrder * 3600 * 1000,
     });
 
-    const lines: string[] = [
-      `Order created: ${result.order.id}`,
-      `Requested path: business fixed speed -> standard fallback.`,
-      `Chosen mode: ${nhOrderModeLabel(result.chosenMode)}${result.usedFallback ? ' (fallback used)' : ''}.`,
-      `Order type: ${result.order.orderType}${result.order.subType ? ` (${result.order.subType})` : ''}.`,
-      `Market: ${result.order.market}. Amount: ${result.order.amount.toFixed(8)} BTC. Limit: ${result.order.limit.toFixed(6)} EH/s.`,
+    const expiryIso = new Date(payment.expiresAt).toISOString();
+    const lines = [
+      `Order ${order.id} accepted. Status: ${order.status}. Provider selected: NiceHash.`,
+      `Order mode: ${requestedOrderModeLabel('direct_fixed_speed')}.`,
+      `Execution after payment: business fixed speed first, then standard fallback if needed.`,
+      `Requested amount: ${amount.toFixed(8)} BTC. Limit: ${(limitEh * TH_PER_EH).toFixed(2)} TH/s${
+        typeof bottomLimitEh === 'number' ? `, bottomLimit ${(bottomLimitEh * TH_PER_EH).toFixed(2)} TH/s` : ''
+      }.`,
+      `Payment reference: ${payment.reference} (expires ${expiryIso})`,
+      `USDC (Base): ${paymentUsdcBaseAddress() ?? 'not configured'} (amount: ${payment.usdcBaseAmount.toFixed(6)} USDC)`,
+      `USDC (Solana): ${paymentUsdcSolAddress() ?? 'not configured'} (amount: ${payment.usdcSolAmount.toFixed(6)} USDC)`,
+      `BTC on-chain: ${paymentBtcAddress() ?? 'not configured'}${payment.btcAmount ? ` (amount: ${payment.btcAmount.toFixed(8)} BTC)` : ''}`,
+      'Important: pay the exact amount shown (all decimals). Underpayment keeps the order pending.',
+      'Once payment is confirmed, the order will auto-start on NiceHash.',
     ];
-    if (typeof result.order.bottomLimit === 'number') {
-      lines.push(`Bottom limit: ${result.order.bottomLimit.toFixed(6)} EH/s.`);
-    }
-    if (result.order.orderType === 'standard') {
-      lines.push(`Standard fallback price: ${result.order.price.toFixed(8)} BTC/EH/day.`);
-    }
-    if (result.failures.length > 0) {
-      lines.push(`Earlier candidate failures: ${result.failures.length}.`);
-      lines.push(`First failure: ${result.failures[0]}`);
-    }
-
-    if (cancelAfterCreate) {
-      await cancelNhOrder(result.order.id);
-      lines.push(`Order ${result.order.id} was canceled immediately (cancel_after_create=true).`);
-    }
-
-    let out = lines.join('\n');
-    if (out.length > 1900) out = `${out.slice(0, 1850)}\n...truncated`;
-    await interaction.reply({ content: out, ephemeral: true });
+    await interaction.reply({ content: lines.join('\n'), ephemeral: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    await interaction.reply({ content: `Fixed-speed create failed: ${msg}`, ephemeral: true });
+    await interaction.reply({ content: `Fixed-speed request failed: ${msg}`, ephemeral: true });
   }
 }
 
 async function handleRentWithFixedDuration(interaction: ChatInputCommandInteraction) {
-  if (!isAdmin(interaction.user.id)) {
-    await interaction.reply({ content: 'Admins only.', ephemeral: true });
-    return;
-  }
-
   const amount = interaction.options.getNumber('amount', true);
-  const hours = interaction.options.getNumber('hours', true);
+  const hours = interaction.options.getInteger('hours', true);
   if (!isFinite(amount) || amount <= 0) {
     await interaction.reply({ content: 'Amount must be > 0 BTC.', ephemeral: true });
     return;
@@ -2227,29 +2310,16 @@ async function handleRentWithFixedDuration(interaction: ChatInputCommandInteract
     return;
   }
 
-  const market = (interaction.options.getString('market') ?? 'EU').toUpperCase();
-  const poolId = interaction.options.getString('pool_id') ?? undefined;
-  const pool = interaction.options.getString('pool') ?? undefined;
-  const worker = interaction.options.getString('worker') ?? undefined;
-  const cancelAfterCreate = interaction.options.getBoolean('cancel_after_create') ?? false;
+  const pool = interaction.options.getString('pool', true);
+  const worker = interaction.options.getString('worker', true);
   const variant = parseDurationVariantInput(interaction.options.getString('variant')) ?? 'auto';
 
-  if (!poolId && (!pool || !worker)) {
-    await interaction.reply({
-      content: 'Provide either `pool_id`, or both `pool` and `worker`.',
-      ephemeral: true,
-    });
+  const poolOk = validatePool(pool);
+  if (!poolOk.valid) {
+    await interaction.reply({ content: `Pool not allowed: ${poolOk.reason}`, ephemeral: true });
     return;
   }
-
-  if (pool) {
-    const poolOk = validatePool(pool);
-    if (!poolOk.valid) {
-      await interaction.reply({ content: `Pool not allowed: ${poolOk.reason}`, ephemeral: true });
-      return;
-    }
-  }
-  if (worker && !isValidWorkerName(worker)) {
+  if (!isValidWorkerName(worker)) {
     await interaction.reply({
       content: 'Worker must be a valid BTC mainnet address only (no suffix like `.worker`, no dots).',
       ephemeral: true,
@@ -2260,16 +2330,10 @@ async function handleRentWithFixedDuration(interaction: ChatInputCommandInteract
   let limitEh: number | undefined;
   let bottomLimitEh: number | undefined;
   try {
-    limitEh = resolveEhFromEither({
-      eh: interaction.options.getNumber('limit_eh'),
-      th: interaction.options.getNumber('limit_th'),
-      label: 'limit',
-    });
-    bottomLimitEh = resolveEhFromEither({
-      eh: interaction.options.getNumber('bottom_limit_eh'),
-      th: interaction.options.getNumber('bottom_limit_th'),
-      label: 'bottom_limit',
-    });
+    const limitTh = interaction.options.getNumber('limit_th');
+    const bottomLimitTh = interaction.options.getNumber('bottom_limit_th');
+    limitEh = typeof limitTh === 'number' ? ehFromTh(limitTh) : undefined;
+    bottomLimitEh = typeof bottomLimitTh === 'number' ? ehFromTh(bottomLimitTh) : undefined;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await interaction.reply({ content: `Input error: ${msg}`, ephemeral: true });
@@ -2277,50 +2341,59 @@ async function handleRentWithFixedDuration(interaction: ChatInputCommandInteract
   }
 
   try {
-    const result = await createNhDirectFixedDurationThenStandard({
-      market,
+    const btcPrice = await btcUsd();
+    if (!isFinite(btcPrice) || btcPrice <= 0) {
+      throw new Error('BTC price unavailable; unable to create payment intent right now.');
+    }
+    const totalUsd = Number((amount * btcPrice).toFixed(6));
+    const phApprox = (limitEh ?? bottomLimitEh ?? 0.001) * 1000;
+    const directConfig: NhDirectFixedDurationConfig = {
+      kind: 'direct_fixed_duration',
       amount,
       hours,
       limitEh,
       bottomLimitEh,
       variant,
-      poolId,
-      poolUrl: pool,
+    };
+
+    const order = await createOrder({
+      ph: phApprox,
+      hours,
+      pool,
       worker,
+      requestedProvider: DEFAULT_FULFILLMENT_PROVIDER,
+      nhRequestedMode: 'direct_fixed_duration',
+      nhDirectConfig: JSON.stringify(directConfig),
+      user: interaction.user.id,
+      totalUsd,
+    });
+    const payment = await ensurePaymentIntent({
+      orderId: order.id,
+      userId: interaction.user.id,
+      totalUsd: order.totalUsd,
+      btcUsd: btcPrice,
+      expiresAt: order.expiresAt ?? Date.now() + hours * 3600 * 1000,
     });
 
-    const lines: string[] = [
-      `Order created: ${result.order.id}`,
-      `Requested path: business fixed duration${variant !== 'auto' ? ` (${variant})` : ' (auto variants)'} -> standard fallback.`,
-      `Chosen mode: ${nhOrderModeLabel(result.chosenMode)}${result.usedFallback ? ' (fallback used)' : ''}.`,
-      `Order type: ${result.order.orderType}${result.order.subType ? ` (${result.order.subType})` : ''}.`,
-      `Market: ${result.order.market}. Amount: ${result.order.amount.toFixed(8)} BTC. Limit: ${result.order.limit.toFixed(6)} EH/s.`,
+    const expiryIso = new Date(payment.expiresAt).toISOString();
+    const lines = [
+      `Order ${order.id} accepted. Status: ${order.status}. Provider selected: NiceHash.`,
+      `Order mode: ${requestedOrderModeLabel('direct_fixed_duration')}.`,
+      `Execution after payment: business fixed duration${variant !== 'auto' ? ` (${variant})` : ' (auto variants)'} first, then standard fallback if needed.`,
+      `Requested amount: ${amount.toFixed(8)} BTC. Duration: ${hours}h.${typeof limitEh === 'number' ? ` Limit: ${(limitEh * TH_PER_EH).toFixed(2)} TH/s.` : ''}${
+        typeof bottomLimitEh === 'number' ? ` Bottom limit: ${(bottomLimitEh * TH_PER_EH).toFixed(2)} TH/s.` : ''
+      }`,
+      `Payment reference: ${payment.reference} (expires ${expiryIso})`,
+      `USDC (Base): ${paymentUsdcBaseAddress() ?? 'not configured'} (amount: ${payment.usdcBaseAmount.toFixed(6)} USDC)`,
+      `USDC (Solana): ${paymentUsdcSolAddress() ?? 'not configured'} (amount: ${payment.usdcSolAmount.toFixed(6)} USDC)`,
+      `BTC on-chain: ${paymentBtcAddress() ?? 'not configured'}${payment.btcAmount ? ` (amount: ${payment.btcAmount.toFixed(8)} BTC)` : ''}`,
+      'Important: pay the exact amount shown (all decimals). Underpayment keeps the order pending.',
+      'Once payment is confirmed, the order will auto-start on NiceHash.',
     ];
-    if (typeof result.order.bottomLimit === 'number') {
-      lines.push(`Bottom limit: ${result.order.bottomLimit.toFixed(6)} EH/s.`);
-    }
-    if (result.order.endTs) {
-      lines.push(`End timestamp: ${result.order.endTs}`);
-    }
-    if (result.order.orderType === 'standard') {
-      lines.push(`Standard fallback price: ${result.order.price.toFixed(8)} BTC/EH/day.`);
-    }
-    if (result.failures.length > 0) {
-      lines.push(`Earlier candidate failures: ${result.failures.length}.`);
-      lines.push(`First failure: ${result.failures[0]}`);
-    }
-
-    if (cancelAfterCreate) {
-      await cancelNhOrder(result.order.id);
-      lines.push(`Order ${result.order.id} was canceled immediately (cancel_after_create=true).`);
-    }
-
-    let out = lines.join('\n');
-    if (out.length > 1900) out = `${out.slice(0, 1850)}\n...truncated`;
-    await interaction.reply({ content: out, ephemeral: true });
+    await interaction.reply({ content: lines.join('\n'), ephemeral: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    await interaction.reply({ content: `Fixed-duration create failed: ${msg}`, ephemeral: true });
+    await interaction.reply({ content: `Fixed-duration request failed: ${msg}`, ephemeral: true });
   }
 }
 
@@ -2389,7 +2462,7 @@ async function handleStatus(interaction: ChatInputCommandInteraction) {
   const status = [
     `Order ${id}: ${o.status}`,
     `Requested provider: ${providerLabel(o.requestedProvider)}`,
-    `Order mode: ${nhOrderModeLabel(resolveNhOrderMode(o.nhRequestedMode))}`,
+    `Order mode: ${requestedOrderModeLabel(o.nhRequestedMode)}`,
     `Active provider: ${providerLabel(o.fulfillmentProvider)}`,
     `Size: ${o.ph} PH for ${o.hours}h`,
     `Pool: ${o.pool}`,
