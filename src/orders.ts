@@ -102,6 +102,20 @@ export async function cancelOrder(id: string): Promise<string> {
   return `Order ${id} canceled`;
 }
 
+export async function cancelActiveOrderByAdmin(id: string): Promise<'canceled' | 'not_found' | 'not_active'> {
+  const o = await getOrder(id);
+  if (!o) return 'not_found';
+  if (o.status !== 'active') return 'not_active';
+
+  const changes = await dbRun("UPDATE orders SET status = 'canceled' WHERE id = ? AND status = 'active'", [id]);
+  if (changes > 0) return 'canceled';
+
+  const latest = await getOrder(id);
+  if (!latest) return 'not_found';
+  if (latest.status === 'canceled') return 'canceled';
+  return 'not_active';
+}
+
 export async function markPaid(id: string): Promise<string> {
   const o = await getOrder(id);
   if (!o) return 'Not found';

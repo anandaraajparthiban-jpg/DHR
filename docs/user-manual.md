@@ -16,7 +16,7 @@ DHR lets a user:
 ## 2. Roles
 
 - Customer: can quote, create order, track own order, cancel own non-active order.
-- Admin: can run payment verification and manual activation commands.
+- Admin: can run payment verification, manual activation, and active-order cancellation commands.
 
 Admin access is controlled by `ADMIN_USER_IDS` in `.env`.
 
@@ -131,7 +131,17 @@ Parameter:
 
 Use when a customer says payment is complete but order not activated.
 
-## 5.3 `/mark_paid`
+## 5.3 `/cancel_active`
+Purpose: admin-only force cancel for an active order.
+
+Parameter:
+- `id` (required): order ID
+
+Behavior:
+- tries to terminate the live provider order first
+- marks order as `canceled` only when provider termination succeeds
+
+## 5.4 `/mark_paid`
 Purpose: manually trigger fulfillment for an order.
 
 Parameter:
@@ -147,7 +157,7 @@ Important:
 - `fulfilling`: provider placement in progress.
 - `active`: order is running.
 - `complete`: order ended and termination succeeded.
-- `canceled`: user/admin canceled before activation.
+- `canceled`: user canceled before activation, or admin force-canceled an active order.
 
 ## 7. Payment Rules
 

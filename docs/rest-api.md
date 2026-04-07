@@ -191,7 +191,21 @@ curl -s -X POST "$BASE_URL/orders/$ORDER_ID/mark_paid" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-## 6.5 Verify Payments
+## 6.5 Cancel Active Order (Admin Force Cancel)
+
+`POST /orders/:id/cancel_active`
+
+```bash
+curl -s -X POST "$BASE_URL/orders/$ORDER_ID/cancel_active" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+Notes:
+- Requires admin token.
+- Cancels only when order status is `active`.
+- If linked NiceHash order termination fails, API returns an error and keeps order active.
+
+## 6.6 Verify Payments
 
 `POST /payments/verify`
 
@@ -200,7 +214,7 @@ curl -s -X POST "$BASE_URL/payments/verify" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-## 6.6 Verify Payments Debug
+## 6.7 Verify Payments Debug
 
 `POST /payments/verify_debug`
 
@@ -211,7 +225,7 @@ curl -s -X POST "$BASE_URL/payments/verify_debug" \
   -d '{"limit":10}'
 ```
 
-## 6.7 Finance Summary
+## 6.8 Finance Summary
 
 `GET /finance/summary`
 

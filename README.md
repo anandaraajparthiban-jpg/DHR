@@ -1,7 +1,7 @@
 # DHR — Discord Hashrate Rental Bot
 
 ## What’s working
-- Discord bot with slash commands: /quote, /rent, /status, /cancel, /payment_status, /mark_paid (admin), /verify_payments (admin).
+- Discord bot with slash commands: /quote, /rent, /status, /cancel, /cancel_active (admin), /payment_status, /mark_paid (admin), /verify_payments (admin).
 - Quotes: NiceHash price with fee/margin/buffer breakdown; BTC price fallback; pool validation and size/duration caps; payment instructions (USDC Base, USDC Solana, BTC); buffer baked in and shown.
 - NiceHash quotes are required in this initial release; non-NiceHash fallback sources are not used by commands.
 - Persistence: runtime-selectable DB backend (`sqlite` default, or `postgres` via env) for orders/payment state.
@@ -28,6 +28,7 @@
 - `/status id:<order-id>` — check status (DB-backed).
 - `/time_left id:<order-id>` — active order remaining time.
 - `/cancel id:<order-id>` — cancel if not active.
+- `/cancel_active id:<order-id>` — admin only; cancel an active order and terminate provider order.
 - `/payment_status id:<order-id>` — see payment intent status + expected amounts/reference.
 - `/mark_paid id:<order-id>` — admin only; activates on NiceHash.
 - `/verify_payments` — admin only; run payment verification tick immediately.
@@ -86,6 +87,7 @@ Routes:
 - `GET /orders/:id`
 - `GET /orders/:id/time_left`
 - `POST /orders/:id/cancel`
+- `POST /orders/:id/cancel_active` (admin)
 - `GET /orders/:id/payment_status`
 - `POST /orders/:id/mark_paid` (admin)
 - `POST /payments/verify` (admin)

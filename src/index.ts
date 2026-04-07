@@ -1,5 +1,5 @@
 // index.ts — Discord bot main:
-// - Registers slash commands (/quote, /rent, /status, /time_left, /cancel, /payment_status, /mark_paid, /verify_payments, /verify_payments_debug, /finance_summary).
+// - Registers slash commands (/quote, /rent, /status, /time_left, /cancel, /cancel_active, /payment_status, /mark_paid, /verify_payments, /verify_payments_debug, /finance_summary).
 // - /rent collects pool + worker, creates payment intent, and waits for payment.
 // - On payment confirmation, orders can auto-activate; admin can still trigger /mark_paid manually.
 // - Fulfillment uses NiceHash only.
@@ -14,6 +14,7 @@ import { ensureDbReady, dbBackend, dbGet } from './db.js';
 import {
   createOrder,
   cancelOrder,
+  cancelActiveOrderByAdmin,
   beginFulfillment,
   markPaid,
   rollbackFulfillment,
@@ -151,6 +152,10 @@ const commands = [
   new SlashCommandBuilder()
     .setName('cancel')
     .setDescription('Cancel a rental (if allowed)')
+    .addStringOption((opt) => opt.setName('id').setDescription('Order ID').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('cancel_active')
+    .setDescription('Admin: cancel an active rental by ID')
     .addStringOption((opt) => opt.setName('id').setDescription('Order ID').setRequired(true)),
   new SlashCommandBuilder()
     .setName('mark_paid')
@@ -881,7 +886,10 @@ function requireAdmin(auth: ApiAuthContext): void {
   }
 }
 
-function parseOrderId(path: string, suffix: '' | '/time_left' | '/cancel' | '/payment_status' | '/mark_paid' = ''): string | undefined {
+function parseOrderId(
+  path: string,
+  suffix: '' | '/time_left' | '/cancel' | '/cancel_active' | '/payment_status' | '/mark_paid' = ''
+): string | undefined {
   if (!path.startsWith('/orders/')) return undefined;
   const rest = path.slice('/orders/'.length);
   if (!suffix) {
@@ -1080,6 +1088,61 @@ async function financeSummaryData(): Promise<{
     spendUsd,
     netUsd,
   };
+}
+
+type AdminActiveCancelResultCode = 'canceled' | 'not_found' | 'not_active' | 'termination_failed';
+
+interface AdminActiveCancelResult {
+  code: AdminActiveCancelResultCode;
+  message: string;
+}
+
+async function adminCancelActiveOrderById(orderId: string): Promise<AdminActiveCancelResult> {
+  const current = await getOrder(orderId);
+  if (!current) {
+    return { code: 'not_found', message: 'Order not found' };
+  }
+  if (current.status !== 'active') {
+    return { code: 'not_active', message: `Order ${orderId} is not active (status: ${current.status})` };
+  }
+
+  if (current.fulfillmentProvider === 'nicehash' && current.nhOrderId) {
+    try {
+      await cancelNhOrder(current.nhOrderId);
+    } catch (err) {
+      return {
+        code: 'termination_failed',
+        message: `Failed to cancel NiceHash order ${current.nhOrderId}: ${err instanceof Error ? err.message : 'unknown error'}`,
+      };
+    }
+  }
+
+  const cancelState = await cancelActiveOrderByAdmin(orderId);
+  if (cancelState === 'not_found') {
+    return { code: 'not_found', message: 'Order not found' };
+  }
+  if (cancelState === 'not_active') {
+    const latest = await getOrder(orderId);
+    return {
+      code: 'not_active',
+      message: `Order ${orderId} is no longer active${latest ? ` (status: ${latest.status})` : ''}`,
+    };
+  }
+
+  const existing = orderExpiryTimers.get(orderId);
+  if (existing) {
+    clearTimeout(existing);
+    orderExpiryTimers.delete(orderId);
+  }
+
+  await notifyUser(
+    current.user,
+    `Your DHR order ${orderId} was canceled by admin.\nProvider: ${providerLabel(
+      current.fulfillmentProvider
+    )}\nPool: ${current.pool}\nWorker: ${current.worker}`
+  );
+
+  return { code: 'canceled', message: `Order ${orderId} canceled by admin` };
 }
 
 function canAccessOrderFromApi(auth: ApiAuthContext, orderUserId: string): boolean {
@@ -1417,6 +1480,17 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
       return;
     }
 
+    const orderCancelActiveId = method === 'POST' ? parseOrderId(routePath, '/cancel_active') : undefined;
+    if (method === 'POST' && orderCancelActiveId) {
+      requireAdmin(auth);
+      const result = await adminCancelActiveOrderById(orderCancelActiveId);
+      if (result.code === 'not_found') throw new ApiHttpError(404, 'not_found', result.message);
+      if (result.code === 'not_active') throw new ApiHttpError(409, 'invalid_state', result.message);
+      if (result.code === 'termination_failed') throw new ApiHttpError(502, 'fulfillment_error', result.message);
+      sendApiJson(res, 200, { ok: true, orderId: orderCancelActiveId, message: result.message });
+      return;
+    }
+
     const orderPaymentStatusId = method === 'GET' ? parseOrderId(routePath, '/payment_status') : undefined;
     if (method === 'GET' && orderPaymentStatusId) {
       const o = await getOrder(orderPaymentStatusId);
@@ -1545,6 +1619,9 @@ client.on('interactionCreate', async (interaction) => {
         break;
       case 'cancel':
         await handleCancel(interaction);
+        break;
+      case 'cancel_active':
+        await handleAdminCancelActive(interaction);
         break;
       case 'mark_paid':
         await handleMarkPaid(interaction);
@@ -1909,6 +1986,30 @@ async function handleCancel(interaction: ChatInputCommandInteraction) {
   }
   const res = await cancelOrder(id);
   await interaction.reply({ content: res, ephemeral: true });
+}
+
+async function handleAdminCancelActive(interaction: ChatInputCommandInteraction) {
+  if (!isAdmin(interaction.user.id)) {
+    await interaction.reply({ content: 'Not authorized', ephemeral: true });
+    return;
+  }
+
+  const id = interaction.options.getString('id', true);
+  const result = await adminCancelActiveOrderById(id);
+  if (result.code === 'not_found') {
+    await interaction.reply({ content: result.message, ephemeral: true });
+    return;
+  }
+  if (result.code === 'not_active') {
+    await interaction.reply({ content: result.message, ephemeral: true });
+    return;
+  }
+  if (result.code === 'termination_failed') {
+    await interaction.reply({ content: result.message, ephemeral: true });
+    return;
+  }
+
+  await interaction.reply({ content: result.message, ephemeral: true });
 }
 
 async function handlePaymentStatus(interaction: ChatInputCommandInteraction) {
