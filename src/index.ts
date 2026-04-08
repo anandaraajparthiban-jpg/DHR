@@ -161,6 +161,8 @@ const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 const BECH32_MAP = new Map(BECH32_CHARSET.split('').map((c, i) => [c, i]));
 const BECH32M_CONST = 0x2bc830a3;
 const TH_PER_EH = 1_000_000;
+const MAX_RENT_HOURS = 24 * 90;
+const MAX_RENT_DURATION_LABEL = `${MAX_RENT_HOURS} hours (90 days)`;
 const DIRECT_ORDER_MARGIN_BPS = (() => {
   const raw = Number(process.env.PRICE_MARGIN_BPS ?? '1000');
   if (!isFinite(raw)) return 1000;
@@ -178,14 +180,14 @@ const commands = [
     .setName('quote')
     .setDescription('Get a hashrate quote')
     .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
-    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72)),
+    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(MAX_RENT_HOURS)),
   ...(SHOW_LEGACY_RENT_COMMAND
     ? [
         new SlashCommandBuilder()
           .setName('rent')
           .setDescription('Place a hashrate rental')
           .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
-          .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72))
+          .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(MAX_RENT_HOURS))
           .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL').setRequired(true))
           .addStringOption((opt) => opt.setName('worker').setDescription('BTC address only (no suffix)').setRequired(true)),
       ]
@@ -202,7 +204,7 @@ const commands = [
     .setName('rent-with-fixed-duration')
     .setDescription('Place fixed-duration business order request (payment first, then business->standard)')
     .addNumberOption((opt) => opt.setName('amount').setDescription('Order amount in BTC').setRequired(true))
-    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72))
+    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(MAX_RENT_HOURS))
     .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL, e.g. stratum+tcp://host:3334').setRequired(true))
     .addStringOption((opt) => opt.setName('worker').setDescription('BTC address / worker').setRequired(true))
     .addNumberOption((opt) => opt.setName('bottom_limit_th').setDescription('Optional bottom limit in TH/s').setRequired(false))
@@ -257,7 +259,7 @@ const commands = [
     .setName('nh_payload_preview')
     .setDescription('Admin: preview NiceHash payload without placing order')
     .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
-    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(72))
+    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(MAX_RENT_HOURS))
     .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL').setRequired(true))
     .addStringOption((opt) => opt.setName('worker').setDescription('BTC address only (no suffix)').setRequired(true))
     .addStringOption((opt) =>
@@ -688,7 +690,7 @@ function validateSizeDuration(ph: number, hours: number): string | undefined {
   if (maxPh > 0 && ph > maxPh) return `Maximum size is ${maxPh} PH`;
   if (minHours > 0 && hours < minHours) return `Minimum duration is ${minHours} hours`;
   if (maxHours > 0 && hours > maxHours) return `Maximum duration is ${maxHours} hours`;
-  if (hours > 72) return 'Maximum duration is 72 hours';
+  if (hours > MAX_RENT_HOURS) return `Maximum duration is ${MAX_RENT_DURATION_LABEL}`;
   return undefined;
 }
 
@@ -1580,8 +1582,12 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
       const body = await readJsonBody(req, cfg.maxBodyBytes);
       const ph = bodyNumber(body, 'ph');
       const hours = bodyInteger(body, 'hours');
+      const previewAmountBtc = optionalBodyNumber(body, 'amount', 'amount_btc', 'amountBtc');
       const validationError = validateSizeDuration(ph, hours);
       if (validationError) throw new ApiHttpError(400, 'validation_error', validationError);
+      if (previewAmountBtc !== undefined && (!isFinite(previewAmountBtc) || previewAmountBtc <= 0)) {
+        throw new ApiHttpError(400, 'validation_error', "Field 'amount' must be > 0");
+      }
 
       let resolved: Awaited<ReturnType<typeof resolveFulfillmentQuote>>;
       try {
@@ -1603,6 +1609,32 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
       const marginTotal = q.marginUsdPerPhDay * units;
       const bufferTotal = q.bufferUsdPerPhDay * units;
       const feePct = q.baseUsdPerPhDay > 0 ? (q.feeUsdPerPhDay / q.baseUsdPerPhDay) * 100 : 0;
+      const estimatedBtcAmount =
+        isFinite(resolved.btcPrice) && resolved.btcPrice > 0 ? Number((q.totalUsd / resolved.btcPrice).toFixed(8)) : undefined;
+      const marginPreviewGrossBtc = previewAmountBtc ?? estimatedBtcAmount;
+      let directBusinessAmountPreview:
+        | {
+            source: 'request_amount' | 'quote_estimated_btc';
+            grossAmountBtc: number;
+            nhNetAmountBtc: number;
+            marginAmountBtc: number;
+            marginPercent: number;
+          }
+        | undefined;
+      if (marginPreviewGrossBtc !== undefined) {
+        try {
+          const breakdown = directOrderAmountBreakdown(marginPreviewGrossBtc);
+          directBusinessAmountPreview = {
+            source: previewAmountBtc !== undefined ? 'request_amount' : 'quote_estimated_btc',
+            grossAmountBtc: breakdown.grossAmountBtc,
+            nhNetAmountBtc: breakdown.nhAmountBtc,
+            marginAmountBtc: breakdown.marginAmountBtc,
+            marginPercent: breakdown.marginBps / 100,
+          };
+        } catch {
+          // best-effort preview only
+        }
+      }
 
       sendApiJson(res, 200, {
         ok: true,
@@ -1634,8 +1666,9 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
           usdcSolAddress: paymentUsdcSolAddress(),
           btcOnchainAddress: paymentBtcAddress(),
           estimatedUsdcAmount: Number(q.totalUsd.toFixed(6)),
-          estimatedBtcAmount: Number((q.totalUsd / resolved.btcPrice).toFixed(8)),
+          estimatedBtcAmount: estimatedBtcAmount ?? null,
         },
+        directBusinessAmountPreview: directBusinessAmountPreview ?? null,
       });
       return;
     }
@@ -1773,7 +1806,7 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
       }
       const totalUsd = Number((directAmounts.grossAmountBtc * btcPrice).toFixed(6));
       const configuredHours = Number(process.env.NH_DIRECT_SPEED_ORDER_HOURS ?? '24');
-      const hoursForOrder = isFinite(configuredHours) ? Math.min(72, Math.max(1, Math.round(configuredHours))) : 24;
+      const hoursForOrder = isFinite(configuredHours) ? Math.min(MAX_RENT_HOURS, Math.max(1, Math.round(configuredHours))) : 24;
       const phFromLimit = limitEh * 1000;
       const directConfig: NhDirectFixedSpeedConfig = {
         kind: 'direct_fixed_speed',
@@ -1810,9 +1843,6 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
         orderModeBehavior: 'After payment confirmation: business fixed speed first, then standard fallback.',
         request: {
           amountBtc: directAmounts.grossAmountBtc,
-          nhAmountBtc: directAmounts.nhAmountBtc,
-          marginAmountBtc: directAmounts.marginAmountBtc,
-          marginPercent: directAmounts.marginBps / 100,
           limitTh,
           bottomLimitTh: bottomLimitTh ?? null,
         },
@@ -1846,8 +1876,8 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
       if (!isFinite(amount) || amount <= 0) {
         throw new ApiHttpError(400, 'validation_error', 'Field \'amount\' must be > 0');
       }
-      if (!isFinite(hours) || hours <= 0 || hours > 72) {
-        throw new ApiHttpError(400, 'validation_error', 'Field \'hours\' must be an integer within [1, 72]');
+      if (!isFinite(hours) || hours <= 0 || hours > MAX_RENT_HOURS) {
+        throw new ApiHttpError(400, 'validation_error', `Field 'hours' must be an integer within [1, ${MAX_RENT_HOURS}]`);
       }
       if (variantRaw && !variant) {
         throw new ApiHttpError(
@@ -1924,9 +1954,6 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
           'After payment confirmation: business fixed duration variant(s) first, then standard fallback.',
         request: {
           amountBtc: directAmounts.grossAmountBtc,
-          nhAmountBtc: directAmounts.nhAmountBtc,
-          marginAmountBtc: directAmounts.marginAmountBtc,
-          marginPercent: directAmounts.marginBps / 100,
           hours,
           limitTh: limitTh ?? null,
           bottomLimitTh: bottomLimitTh ?? null,
@@ -2193,8 +2220,8 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
     await interaction.reply({ content: `Maximum duration is ${maxHours} hours`, ephemeral: true });
     return;
   }
-  if (hours > 72) {
-    await interaction.reply({ content: 'Maximum duration is 72 hours', ephemeral: true });
+  if (hours > MAX_RENT_HOURS) {
+    await interaction.reply({ content: `Maximum duration is ${MAX_RENT_DURATION_LABEL}`, ephemeral: true });
     return;
   }
 
@@ -2303,8 +2330,8 @@ async function handleNhPayloadPreview(interaction: ChatInputCommandInteraction) 
     await interaction.reply({ content: `Maximum duration is ${maxHours} hours`, ephemeral: true });
     return;
   }
-  if (hours > 72) {
-    await interaction.reply({ content: 'Maximum duration is 72 hours', ephemeral: true });
+  if (hours > MAX_RENT_HOURS) {
+    await interaction.reply({ content: `Maximum duration is ${MAX_RENT_DURATION_LABEL}`, ephemeral: true });
     return;
   }
 
@@ -2396,8 +2423,8 @@ async function handleRent(interaction: ChatInputCommandInteraction) {
     await interaction.reply({ content: `Maximum duration is ${maxHours} hours`, ephemeral: true });
     return;
   }
-  if (hours > 72) {
-    await interaction.reply({ content: 'Maximum duration is 72 hours', ephemeral: true });
+  if (hours > MAX_RENT_HOURS) {
+    await interaction.reply({ content: `Maximum duration is ${MAX_RENT_DURATION_LABEL}`, ephemeral: true });
     return;
   }
 
@@ -2542,7 +2569,7 @@ async function handleRentWithFixedSpeed(interaction: ChatInputCommandInteraction
     }
     const totalUsd = Number((directAmounts.grossAmountBtc * btcPrice).toFixed(6));
     const configuredHours = Number(process.env.NH_DIRECT_SPEED_ORDER_HOURS ?? '24');
-    const hoursForOrder = isFinite(configuredHours) ? Math.min(72, Math.max(1, Math.round(configuredHours))) : 24;
+    const hoursForOrder = isFinite(configuredHours) ? Math.min(MAX_RENT_HOURS, Math.max(1, Math.round(configuredHours))) : 24;
     const phFromLimit = limitEh * 1000;
     const directConfig: NhDirectFixedSpeedConfig = {
       kind: 'direct_fixed_speed',
@@ -2575,9 +2602,7 @@ async function handleRentWithFixedSpeed(interaction: ChatInputCommandInteraction
       `Order ${order.id} accepted. Status: ${order.status}. Provider selected: NiceHash.`,
       `Order mode: ${requestedOrderModeLabel('direct_fixed_speed')}.`,
       `Execution after payment: business fixed speed first, then standard fallback if needed.`,
-      `Requested amount (gross): ${directAmounts.grossAmountBtc.toFixed(8)} BTC. NH amount after margin (${(
-        directAmounts.marginBps / 100
-      ).toFixed(2)}%): ${directAmounts.nhAmountBtc.toFixed(8)} BTC. Margin kept: ${directAmounts.marginAmountBtc.toFixed(8)} BTC.`,
+      `Requested amount: ${directAmounts.grossAmountBtc.toFixed(8)} BTC.`,
       `Limit: ${(limitEh * TH_PER_EH).toFixed(2)} TH/s${
         typeof bottomLimitEh === 'number' ? `, bottomLimit ${(bottomLimitEh * TH_PER_EH).toFixed(2)} TH/s` : ''
       }.`,
@@ -2604,6 +2629,10 @@ async function handleRentWithFixedDuration(interaction: ChatInputCommandInteract
   }
   if (!isFinite(hours) || hours <= 0) {
     await interaction.reply({ content: 'Hours must be > 0.', ephemeral: true });
+    return;
+  }
+  if (hours > MAX_RENT_HOURS) {
+    await interaction.reply({ content: `Maximum duration is ${MAX_RENT_DURATION_LABEL}`, ephemeral: true });
     return;
   }
   let directAmounts: ReturnType<typeof directOrderAmountBreakdown>;
@@ -2685,9 +2714,7 @@ async function handleRentWithFixedDuration(interaction: ChatInputCommandInteract
       `Order ${order.id} accepted. Status: ${order.status}. Provider selected: NiceHash.`,
       `Order mode: ${requestedOrderModeLabel('direct_fixed_duration')}.`,
       `Execution after payment: business fixed duration${variant !== 'auto' ? ` (${variant})` : ' (auto variants)'} first, then standard fallback if needed.`,
-      `Requested amount (gross): ${directAmounts.grossAmountBtc.toFixed(8)} BTC. NH amount after margin (${(
-        directAmounts.marginBps / 100
-      ).toFixed(2)}%): ${directAmounts.nhAmountBtc.toFixed(8)} BTC. Margin kept: ${directAmounts.marginAmountBtc.toFixed(8)} BTC.`,
+      `Requested amount: ${directAmounts.grossAmountBtc.toFixed(8)} BTC.`,
       `Duration: ${hours}h.${typeof limitEh === 'number' ? ` Limit: ${(limitEh * TH_PER_EH).toFixed(2)} TH/s.` : ''}${
         typeof bottomLimitEh === 'number' ? ` Bottom limit: ${(bottomLimitEh * TH_PER_EH).toFixed(2)} TH/s.` : ''
       }`,

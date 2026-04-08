@@ -63,7 +63,7 @@ Purpose:
 
 Input:
 - `ph` (required)
-- `hours` (required, max 72)
+- `hours` (required, max 2160 / 90 days)
 
 Behavior:
 - NiceHash quote source.
@@ -116,7 +116,7 @@ Purpose:
 
 Input:
 - `amount` (BTC, required)
-- `hours` (required, max 72)
+- `hours` (required, max 2160 / 90 days)
 - `pool` (required)
 - `worker` (required)
 - `bottom_limit_th` (optional)

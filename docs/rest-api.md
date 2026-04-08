@@ -76,9 +76,18 @@ Request body:
 ```json
 {
   "ph": 1,
-  "hours": 12
+  "hours": 12,
+  "amount": 0.0015
 }
 ```
+
+Notes:
+- `hours` supports up to `2160` (90 days).
+- `amount` is optional.
+- If `amount` is provided, response includes `directBusinessAmountPreview` with gross/net/margin BTC values.
+- If `amount` is omitted, `directBusinessAmountPreview` is derived from quote-estimated BTC amount.
+- Quote context uses NH automatic fallback behavior:
+  - `business_fixed_speed` -> `business_fixed_duration` -> `standard`
 
 Example:
 
@@ -86,12 +95,8 @@ Example:
 curl -s "$BASE_URL/quote" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"ph":1,"hours":12}'
+  -d '{"ph":1,"hours":12,"amount":0.0015}'
 ```
-
-Notes:
-- Quote context uses NH automatic fallback behavior:
-  - `business_fixed_speed` -> `business_fixed_duration` -> `standard`
 
 ## 4.2 `POST /rent`
 
@@ -107,6 +112,9 @@ Request body:
   "worker": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
 }
 ```
+
+Notes:
+- `hours` supports up to `2160` (90 days).
 
 Example:
 
@@ -188,6 +196,7 @@ Request body:
 Notes:
 - `bottom_limit_th`, `limit_th`, `variant` are optional.
 - CamelCase aliases accepted for TH fields: `limitTh`, `bottomLimitTh`.
+- `hours` supports up to `2160` (90 days).
 - `amount` is the **gross customer amount** used for payment intent.
 - Before NiceHash placement, margin is deducted from `amount`:
   - `nhAmountBtc = floor(amount * (1 - PRICE_MARGIN_BPS/10000), 8)`
