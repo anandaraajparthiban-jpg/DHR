@@ -144,6 +144,10 @@ Request body:
 Notes:
 - `bottom_limit_th` is optional.
 - Also accepts camelCase aliases: `limitTh`, `bottomLimitTh`.
+- `amount` is the **gross customer amount** used for payment intent.
+- Before NiceHash placement, margin is deducted from `amount`:
+  - `nhAmountBtc = floor(amount * (1 - PRICE_MARGIN_BPS/10000), 8)`
+  - default `PRICE_MARGIN_BPS=1000` (10%)
 
 Example:
 
@@ -184,6 +188,10 @@ Request body:
 Notes:
 - `bottom_limit_th`, `limit_th`, `variant` are optional.
 - CamelCase aliases accepted for TH fields: `limitTh`, `bottomLimitTh`.
+- `amount` is the **gross customer amount** used for payment intent.
+- Before NiceHash placement, margin is deducted from `amount`:
+  - `nhAmountBtc = floor(amount * (1 - PRICE_MARGIN_BPS/10000), 8)`
+  - default `PRICE_MARGIN_BPS=1000` (10%)
 - `variant` values:
   - `auto`
   - `business_type_endts`

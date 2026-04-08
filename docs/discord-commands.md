@@ -99,8 +99,11 @@ Example:
 ```
 
 Notes:
-- `amount` is the NH order BTC amount target requested for fulfillment.
-- Payment intent amount is calculated from current BTC/USD at request time.
+- `amount` is the gross customer BTC amount used for payment intent.
+- NH placement uses amount after margin deduction:
+  - `nhAmountBtc = floor(amount * (1 - PRICE_MARGIN_BPS/10000), 8)`
+  - default `PRICE_MARGIN_BPS=1000` (10%)
+- Payment intent amount is calculated from current BTC/USD at request time using gross amount.
 - If business fixed speed fails at placement time, standard order fallback is attempted automatically.
 
 ## 4.3 `/rent-with-fixed-duration`
@@ -135,6 +138,10 @@ Example:
 ```
 
 Notes:
+- `amount` is the gross customer BTC amount used for payment intent.
+- NH placement uses amount after margin deduction:
+  - `nhAmountBtc = floor(amount * (1 - PRICE_MARGIN_BPS/10000), 8)`
+  - default `PRICE_MARGIN_BPS=1000` (10%)
 - `variant:auto` tries known duration payload variants sequentially.
 - If all business duration variants fail, standard fallback is attempted.
 

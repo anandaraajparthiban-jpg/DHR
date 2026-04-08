@@ -161,10 +161,16 @@ const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 const BECH32_MAP = new Map(BECH32_CHARSET.split('').map((c, i) => [c, i]));
 const BECH32M_CONST = 0x2bc830a3;
 const TH_PER_EH = 1_000_000;
+const DIRECT_ORDER_MARGIN_BPS = (() => {
+  const raw = Number(process.env.PRICE_MARGIN_BPS ?? '1000');
+  if (!isFinite(raw)) return 1000;
+  return Math.min(9_900, Math.max(0, Math.round(raw)));
+})();
 const SHOW_LEGACY_RENT_COMMAND = (process.env.SHOW_LEGACY_RENT_COMMAND ?? 'false').toLowerCase() === 'true';
 
 console.log(`Routing config: NiceHash only, minimum start ${NICEHASH_MIN_START_AMOUNT_BTC.toFixed(8)} BTC`);
 console.log('NiceHash order mode: auto (business fixed speed -> business fixed duration -> standard fallback)');
+console.log(`Direct business margin deduction: ${(DIRECT_ORDER_MARGIN_BPS / 100).toFixed(2)}%`);
 console.log(`Legacy /rent command visibility: ${SHOW_LEGACY_RENT_COMMAND ? 'enabled' : 'hidden'}`);
 
 const commands = [
@@ -715,6 +721,30 @@ function requestedOrderModeLabel(raw?: string): string {
   if (normalized === 'direct_fixed_speed') return 'Direct Fixed Speed (business -> standard fallback)';
   if (normalized === 'direct_fixed_duration') return 'Direct Fixed Duration (business -> standard fallback)';
   return nhOrderModeLabel(resolveNhOrderMode(raw));
+}
+
+function floorBtc8(value: number): number {
+  if (!isFinite(value)) return NaN;
+  return Math.floor(value * 1e8) / 1e8;
+}
+
+function directOrderAmountBreakdown(grossAmountBtc: number): {
+  grossAmountBtc: number;
+  nhAmountBtc: number;
+  marginAmountBtc: number;
+  marginBps: number;
+} {
+  if (!isFinite(grossAmountBtc) || grossAmountBtc <= 0) {
+    throw new Error('Amount must be > 0 BTC.');
+  }
+  const marginBps = DIRECT_ORDER_MARGIN_BPS;
+  const netFactor = 1 - marginBps / 10_000;
+  const nhAmountBtc = floorBtc8(grossAmountBtc * netFactor);
+  if (!isFinite(nhAmountBtc) || nhAmountBtc <= 0) {
+    throw new Error('Amount too small after margin deduction. Increase amount.');
+  }
+  const marginAmountBtc = Number((grossAmountBtc - nhAmountBtc).toFixed(8));
+  return { grossAmountBtc, nhAmountBtc, marginAmountBtc, marginBps };
 }
 
 function parseNhDirectOrderConfig(raw?: string): NhDirectOrderConfig | undefined {
@@ -1713,6 +1743,12 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
       if (limitTh === undefined) {
         throw new ApiHttpError(400, 'bad_request', "Field 'limit_th' is required");
       }
+      let directAmounts: ReturnType<typeof directOrderAmountBreakdown>;
+      try {
+        directAmounts = directOrderAmountBreakdown(amount);
+      } catch (err) {
+        throw new ApiHttpError(400, 'validation_error', err instanceof Error ? err.message : 'Invalid amount');
+      }
 
       const poolOk = validatePool(pool);
       if (!poolOk.valid) {
@@ -1735,13 +1771,13 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
       if (!isFinite(btcPrice) || btcPrice <= 0) {
         throw new ApiHttpError(503, 'quote_unavailable', 'BTC price unavailable; unable to create payment intent');
       }
-      const totalUsd = Number((amount * btcPrice).toFixed(6));
+      const totalUsd = Number((directAmounts.grossAmountBtc * btcPrice).toFixed(6));
       const configuredHours = Number(process.env.NH_DIRECT_SPEED_ORDER_HOURS ?? '24');
       const hoursForOrder = isFinite(configuredHours) ? Math.min(72, Math.max(1, Math.round(configuredHours))) : 24;
       const phFromLimit = limitEh * 1000;
       const directConfig: NhDirectFixedSpeedConfig = {
         kind: 'direct_fixed_speed',
-        amount,
+        amount: directAmounts.nhAmountBtc,
         limitEh,
         bottomLimitEh,
       };
@@ -1773,7 +1809,10 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
         orderModeLabel: requestedOrderModeLabel('direct_fixed_speed'),
         orderModeBehavior: 'After payment confirmation: business fixed speed first, then standard fallback.',
         request: {
-          amountBtc: amount,
+          amountBtc: directAmounts.grossAmountBtc,
+          nhAmountBtc: directAmounts.nhAmountBtc,
+          marginAmountBtc: directAmounts.marginAmountBtc,
+          marginPercent: directAmounts.marginBps / 100,
           limitTh,
           bottomLimitTh: bottomLimitTh ?? null,
         },
@@ -1817,6 +1856,12 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
           "Field 'variant' must be one of: auto, business_type_endts, business_type_subtype_endts, business_engine_duration, business_engine_duration_endts, business_engine_subtype_duration_endts"
         );
       }
+      let directAmounts: ReturnType<typeof directOrderAmountBreakdown>;
+      try {
+        directAmounts = directOrderAmountBreakdown(amount);
+      } catch (err) {
+        throw new ApiHttpError(400, 'validation_error', err instanceof Error ? err.message : 'Invalid amount');
+      }
 
       const poolOk = validatePool(pool);
       if (!poolOk.valid) {
@@ -1839,11 +1884,11 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
       if (!isFinite(btcPrice) || btcPrice <= 0) {
         throw new ApiHttpError(503, 'quote_unavailable', 'BTC price unavailable; unable to create payment intent');
       }
-      const totalUsd = Number((amount * btcPrice).toFixed(6));
+      const totalUsd = Number((directAmounts.grossAmountBtc * btcPrice).toFixed(6));
       const phApprox = (limitEh ?? bottomLimitEh ?? 0.001) * 1000;
       const directConfig: NhDirectFixedDurationConfig = {
         kind: 'direct_fixed_duration',
-        amount,
+        amount: directAmounts.nhAmountBtc,
         hours,
         limitEh,
         bottomLimitEh,
@@ -1878,7 +1923,10 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
         orderModeBehavior:
           'After payment confirmation: business fixed duration variant(s) first, then standard fallback.',
         request: {
-          amountBtc: amount,
+          amountBtc: directAmounts.grossAmountBtc,
+          nhAmountBtc: directAmounts.nhAmountBtc,
+          marginAmountBtc: directAmounts.marginAmountBtc,
+          marginPercent: directAmounts.marginBps / 100,
           hours,
           limitTh: limitTh ?? null,
           bottomLimitTh: bottomLimitTh ?? null,
@@ -2451,6 +2499,14 @@ async function handleRentWithFixedSpeed(interaction: ChatInputCommandInteraction
     await interaction.reply({ content: 'Amount must be > 0 BTC.', ephemeral: true });
     return;
   }
+  let directAmounts: ReturnType<typeof directOrderAmountBreakdown>;
+  try {
+    directAmounts = directOrderAmountBreakdown(amount);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await interaction.reply({ content: `Input error: ${msg}`, ephemeral: true });
+    return;
+  }
 
   const pool = interaction.options.getString('pool', true);
   const worker = interaction.options.getString('worker', true);
@@ -2484,13 +2540,13 @@ async function handleRentWithFixedSpeed(interaction: ChatInputCommandInteraction
     if (!isFinite(btcPrice) || btcPrice <= 0) {
       throw new Error('BTC price unavailable; unable to create payment intent right now.');
     }
-    const totalUsd = Number((amount * btcPrice).toFixed(6));
+    const totalUsd = Number((directAmounts.grossAmountBtc * btcPrice).toFixed(6));
     const configuredHours = Number(process.env.NH_DIRECT_SPEED_ORDER_HOURS ?? '24');
     const hoursForOrder = isFinite(configuredHours) ? Math.min(72, Math.max(1, Math.round(configuredHours))) : 24;
     const phFromLimit = limitEh * 1000;
     const directConfig: NhDirectFixedSpeedConfig = {
       kind: 'direct_fixed_speed',
-      amount,
+      amount: directAmounts.nhAmountBtc,
       limitEh,
       bottomLimitEh,
     };
@@ -2519,7 +2575,10 @@ async function handleRentWithFixedSpeed(interaction: ChatInputCommandInteraction
       `Order ${order.id} accepted. Status: ${order.status}. Provider selected: NiceHash.`,
       `Order mode: ${requestedOrderModeLabel('direct_fixed_speed')}.`,
       `Execution after payment: business fixed speed first, then standard fallback if needed.`,
-      `Requested amount: ${amount.toFixed(8)} BTC. Limit: ${(limitEh * TH_PER_EH).toFixed(2)} TH/s${
+      `Requested amount (gross): ${directAmounts.grossAmountBtc.toFixed(8)} BTC. NH amount after margin (${(
+        directAmounts.marginBps / 100
+      ).toFixed(2)}%): ${directAmounts.nhAmountBtc.toFixed(8)} BTC. Margin kept: ${directAmounts.marginAmountBtc.toFixed(8)} BTC.`,
+      `Limit: ${(limitEh * TH_PER_EH).toFixed(2)} TH/s${
         typeof bottomLimitEh === 'number' ? `, bottomLimit ${(bottomLimitEh * TH_PER_EH).toFixed(2)} TH/s` : ''
       }.`,
       `Payment reference: ${payment.reference} (expires ${expiryIso})`,
@@ -2545,6 +2604,14 @@ async function handleRentWithFixedDuration(interaction: ChatInputCommandInteract
   }
   if (!isFinite(hours) || hours <= 0) {
     await interaction.reply({ content: 'Hours must be > 0.', ephemeral: true });
+    return;
+  }
+  let directAmounts: ReturnType<typeof directOrderAmountBreakdown>;
+  try {
+    directAmounts = directOrderAmountBreakdown(amount);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await interaction.reply({ content: `Input error: ${msg}`, ephemeral: true });
     return;
   }
 
@@ -2583,11 +2650,11 @@ async function handleRentWithFixedDuration(interaction: ChatInputCommandInteract
     if (!isFinite(btcPrice) || btcPrice <= 0) {
       throw new Error('BTC price unavailable; unable to create payment intent right now.');
     }
-    const totalUsd = Number((amount * btcPrice).toFixed(6));
+    const totalUsd = Number((directAmounts.grossAmountBtc * btcPrice).toFixed(6));
     const phApprox = (limitEh ?? bottomLimitEh ?? 0.001) * 1000;
     const directConfig: NhDirectFixedDurationConfig = {
       kind: 'direct_fixed_duration',
-      amount,
+      amount: directAmounts.nhAmountBtc,
       hours,
       limitEh,
       bottomLimitEh,
@@ -2618,7 +2685,10 @@ async function handleRentWithFixedDuration(interaction: ChatInputCommandInteract
       `Order ${order.id} accepted. Status: ${order.status}. Provider selected: NiceHash.`,
       `Order mode: ${requestedOrderModeLabel('direct_fixed_duration')}.`,
       `Execution after payment: business fixed duration${variant !== 'auto' ? ` (${variant})` : ' (auto variants)'} first, then standard fallback if needed.`,
-      `Requested amount: ${amount.toFixed(8)} BTC. Duration: ${hours}h.${typeof limitEh === 'number' ? ` Limit: ${(limitEh * TH_PER_EH).toFixed(2)} TH/s.` : ''}${
+      `Requested amount (gross): ${directAmounts.grossAmountBtc.toFixed(8)} BTC. NH amount after margin (${(
+        directAmounts.marginBps / 100
+      ).toFixed(2)}%): ${directAmounts.nhAmountBtc.toFixed(8)} BTC. Margin kept: ${directAmounts.marginAmountBtc.toFixed(8)} BTC.`,
+      `Duration: ${hours}h.${typeof limitEh === 'number' ? ` Limit: ${(limitEh * TH_PER_EH).toFixed(2)} TH/s.` : ''}${
         typeof bottomLimitEh === 'number' ? ` Bottom limit: ${(bottomLimitEh * TH_PER_EH).toFixed(2)} TH/s.` : ''
       }`,
       `Payment reference: ${payment.reference} (expires ${expiryIso})`,
