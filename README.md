@@ -1,7 +1,7 @@
 # DHR — Discord Hashrate Rental Bot
 
 ## What’s working
-- Discord bot with slash commands: /quote, /rent, /status, /cancel, /payment_status, /mark_paid (admin), /verify_payments (admin).
+- Discord bot with slash commands: /quote, /rent-with-fixed-speed, /rent-with-fixed-duration, /status, /cancel, /payment_status, /mark_paid (admin), /verify_payments (admin).
 - Quotes: NiceHash price with fee/margin/buffer breakdown; BTC price fallback; pool validation and size/duration caps; payment instructions (USDC Base, USDC Solana, BTC); buffer baked in and shown.
 - NiceHash quotes are required in this initial release; non-NiceHash fallback sources are not used by commands.
 - Persistence: runtime-selectable DB backend (`sqlite` default, or `postgres` via env) for orders/payment state.
@@ -24,7 +24,8 @@
 
 ## Commands (current)
 - `/quote ph:<number> hours:<int>` — price with breakdown (NiceHash source).
-- `/rent ph:<number> hours:<int> pool:<stratum url> worker:<btc-address>` — place order (NiceHash fulfillment).
+- `/rent-with-fixed-speed amount:<btc> limit_th:<th/s> pool:<stratum url> worker:<btc-address> [bottom_limit_th:<th/s>]` — payment-first request; post-payment execution is business fixed speed then standard fallback.
+- `/rent-with-fixed-duration amount:<btc> hours:<int> pool:<stratum url> worker:<btc-address> [bottom_limit_th:<th/s>] [limit_th:<th/s>] [variant:<...>]` — payment-first request; post-payment execution is business duration variant(s) then standard fallback.
 - `/status id:<order-id>` — check status (DB-backed).
 - `/time_left id:<order-id>` — active order remaining time.
 - `/cancel id:<order-id>` — cancel if not active.
@@ -33,6 +34,7 @@
 - `/verify_payments` — admin only; run payment verification tick immediately.
 - `/verify_payments_debug limit:<1-20?>` — admin only; diagnostic reasons for payment-match decisions.
 - `/finance_summary` — admin only; revenue vs NiceHash spend.
+- Legacy `/rent` command is hidden by default (`SHOW_LEGACY_RENT_COMMAND=false`) but can be re-enabled.
 
 ## REST API (JWT secured)
 Enable with:
@@ -103,6 +105,8 @@ Routes:
      - SQLite (default): `DB_BACKEND=sqlite`
      - Postgres: set `DB_BACKEND=postgres` and `DATABASE_URL` (optional TLS flags: `PGSSL=true` or `PGSSLMODE=require`)
    - NiceHash: `NICEHASH_API_KEY`, `NICEHASH_API_SECRET`, `NICEHASH_ORG_ID`; optional `NICEHASH_API_BASE`, `NICEHASH_BAL_OVERRIDE_BTC`, `NICEHASH_GATE_ENABLED`; fallback flow is automatic (`business_fixed_speed` -> `business_fixed_duration` -> `standard`), optional `NICEHASH_BUSINESS_BOTTOM_LIMIT_EH` for business modes, optional `NICEHASH_BUSINESS_DURATION_MIN_END_SEC` (minimum duration end window, default `900`)
+   - Discord command visibility: `SHOW_LEGACY_RENT_COMMAND=false` (default hidden), set `true` to show legacy `/rent`.
+   - Optional fixed-speed internal default metadata: `NH_DIRECT_SPEED_ORDER_HOURS=24`
    - Braiins: `BRAIINS_OWNER_TOKEN` or `BRAIINS_READONLY_TOKEN` (spot), optional `BRAIINS_BASE`
    - Payments: `PAYMENT_USDC_BASE` (Base recipient wallet, `0x...`), `PAYMENT_USDC_SOL` (Solana wallet or USDC token account), `PAYMENT_BTC_ONCHAIN`, `PAYMENT_VERIFY_INTERVAL_SEC`, `PAYMENT_BTC_SAT_TOLERANCE`, `PAYMENT_ACCEPT_UNCONFIRMED`, `PAYMENT_MAX_BACK_SKEW_SEC`, `REQUIRE_PAYMENT_CONFIRMATION_FOR_MARK_PAID`, `AUTO_ACTIVATE_ON_PAYMENT`
    - USDC Base verify: `BASE_RPC_URL`, `USDC_BASE_TOKEN` (Base USDC token contract, not your wallet), `PAYMENT_BASE_SCAN_BLOCKS`, `PAYMENT_BASE_MAX_SCAN_BLOCKS`, `PAYMENT_USDC_BASE_TOLERANCE_UNITS`
@@ -120,6 +124,7 @@ NiceHash dry-run payload preview (no order placement):
 Production step-by-step guide: `docs/production-install.md`
 Production go-live gate: `docs/production-go-live-checklist.md`
 Detailed user manual: `docs/user-manual.md`
+Discord command reference: `docs/discord-commands.md`
 REST API guide (cURL): `docs/rest-api.md`
 NiceHash business mode guide: `docs/nicehash-business-mode.md`
 

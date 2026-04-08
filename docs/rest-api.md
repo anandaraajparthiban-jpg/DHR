@@ -1,63 +1,112 @@
-# DHR REST API Documentation (with cURL)
+# DHR REST API Documentation
 
-This document describes the REST API exposed by the DHR bot and provides ready-to-run `curl` examples.
+This is the detailed REST API guide for DHR.
 
-## 1) Base URL and Auth Flow
+## 1) Base URL and Version
 
-- Default base URL: `http://127.0.0.1:8080/api/v1`
-- Public endpoint:
-  - `GET /health`
-- Authentication flow:
-  1. Call `POST /auth/login` with `username` + `password`
-  2. Receive JWT access token
-  3. Use `Authorization: Bearer <token>` on all protected endpoints
+Default:
 
-Access token validity is controlled by `API_JWT_ACCESS_TTL_SEC` (default: `1800` = 30 minutes).
+```text
+http://127.0.0.1:8080/api/v1
+```
 
-API users are stored in database table `api_users`.  
-`API_AUTH_*` env credentials are optional bootstrap seeds imported at startup.
+Public route:
+- `GET /health`
 
-## 2) Quick Variables
+All other routes require JWT bearer token.
+
+## 2) Authentication Model
+
+## 2.1 Login
+
+`POST /auth/login`
+
+Request body:
+
+```json
+{
+  "username": "vendor1",
+  "password": "YourStrongPassword"
+}
+```
+
+Successful response:
+
+```json
+{
+  "ok": true,
+  "accessToken": "<jwt>",
+  "tokenType": "Bearer",
+  "expiresIn": 1800,
+  "user": {
+    "username": "vendor1",
+    "subject": "vendor1",
+    "roles": ["user"],
+    "scopes": ["orders:read", "orders:write"],
+    "isActive": true
+  }
+}
+```
+
+Use token:
+
+```text
+Authorization: Bearer <jwt>
+```
+
+## 2.2 JWT Config
+
+Relevant env vars:
+- `API_JWT_ALGORITHM=HS256|RS256`
+- `API_JWT_SECRET` (HS256) or `API_JWT_PUBLIC_KEY` + `API_JWT_PRIVATE_KEY` (RS256)
+- `API_JWT_ISSUER`
+- `API_JWT_AUDIENCE`
+- `API_JWT_ACCESS_TTL_SEC` (default `1800`)
+- `API_JWT_REQUIRE_JTI`
+- `API_JWT_CLOCK_TOLERANCE_SEC`
+
+## 2.3 Admin Authorization
+
+Admin routes are gated by role/scope:
+- `API_ADMIN_ROLES`
+- `API_ADMIN_SCOPES`
+
+## 3) Quick Start cURL
 
 ```bash
 export BASE_URL="http://127.0.0.1:8080/api/v1"
 export USERNAME="vendor1"
 export PASSWORD="YourStrongPassword"
-```
 
-## 3) Health Check (No Auth)
-
-```bash
-curl -s "$BASE_URL/health"
-```
-
-## 4) Login and Get JWT
-
-```bash
 LOGIN_RESPONSE=$(curl -s "$BASE_URL/auth/login" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"$USERNAME\",\"password\":\"$PASSWORD\"}")
 
-echo "$LOGIN_RESPONSE"
-```
-
-Extract token with `jq`:
-
-```bash
 export TOKEN=$(echo "$LOGIN_RESPONSE" | jq -r '.accessToken')
 ```
 
-If `jq` is not installed:
+## 4) Customer Routes
 
-```bash
-export TOKEN=$(echo "$LOGIN_RESPONSE" | sed -n 's/.*"accessToken":"\([^"]*\)".*/\1/p')
+## 4.1 `POST /quote`
+
+Purpose:
+- Quote price and show breakdown.
+
+Request body:
+
+```json
+{
+  "ph": 1,
+  "hours": 12
+}
 ```
 
-## 5) Protected Endpoints (Customer/User)
+Behavior:
+- Uses NiceHash quote source.
+- Mode behavior for quote context is automatic:
+  - `business_fixed_speed` -> `business_fixed_duration` -> `standard`
 
-## 5.1 Quote
-
-`POST /quote`
+Example:
 
 ```bash
 curl -s "$BASE_URL/quote" \
@@ -66,14 +115,23 @@ curl -s "$BASE_URL/quote" \
   -d '{"ph":1,"hours":12}'
 ```
 
-Order mode is automatic:
-- Try `business_fixed_speed`
-- Then `business_fixed_duration`
-- Then standard orderbook fallback
+## 4.2 `POST /rent`
 
-## 5.2 Rent / Create Order
+Purpose:
+- Create order + payment intent (payment-first flow).
 
-`POST /rent`
+Request body:
+
+```json
+{
+  "ph": 1,
+  "hours": 12,
+  "pool": "stratum+tcp://yourpool:3333",
+  "worker": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+}
+```
+
+Example:
 
 ```bash
 curl -s "$BASE_URL/rent" \
@@ -87,51 +145,53 @@ curl -s "$BASE_URL/rent" \
   }'
 ```
 
-Save created order id:
+Notes:
+- NH placement occurs after payment confirmation, not at request creation time.
+- At fulfillment time, this route uses automatic fallback:
+  - `business_fixed_speed` -> `business_fixed_duration` -> `standard`
 
-```bash
-export ORDER_ID="<paste-order-id>"
-```
+## 4.3 `GET /orders/:id`
 
-## 5.3 Order Status
+Purpose:
+- Order status and summary fields.
 
-`GET /orders/:id`
+Example:
 
 ```bash
 curl -s "$BASE_URL/orders/$ORDER_ID" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-## 5.4 Time Left
+## 4.4 `GET /orders/:id/time_left`
 
-`GET /orders/:id/time_left`
+Example:
 
 ```bash
 curl -s "$BASE_URL/orders/$ORDER_ID/time_left" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-## 5.5 Cancel Order
+## 4.5 `POST /orders/:id/cancel`
 
-`POST /orders/:id/cancel`
+Example:
 
 ```bash
 curl -s -X POST "$BASE_URL/orders/$ORDER_ID/cancel" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-## 5.6 Payment Status
+## 4.6 `GET /orders/:id/payment_status`
 
-`GET /orders/:id/payment_status`
+Example:
 
 ```bash
 curl -s "$BASE_URL/orders/$ORDER_ID/payment_status" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-## 6) Admin Endpoints
+## 5) Admin Routes
 
-Use an admin token (role/scope configured by `API_ADMIN_ROLES` / `API_ADMIN_SCOPES`).
+Use admin token for these routes.
 
 ```bash
 export ADMIN_USERNAME="ops-admin"
@@ -144,18 +204,14 @@ ADMIN_LOGIN_RESPONSE=$(curl -s "$BASE_URL/auth/login" \
 export ADMIN_TOKEN=$(echo "$ADMIN_LOGIN_RESPONSE" | jq -r '.accessToken')
 ```
 
-## 6.1 List API Users
-
-`GET /auth/users`
+## 5.1 `GET /auth/users`
 
 ```bash
 curl -s "$BASE_URL/auth/users" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-## 6.2 Create API User
-
-`POST /auth/users`
+## 5.2 `POST /auth/users`
 
 ```bash
 curl -s -X POST "$BASE_URL/auth/users" \
@@ -166,14 +222,12 @@ curl -s -X POST "$BASE_URL/auth/users" \
     "password": "Vendor2StrongPass!",
     "subject": "vendor2",
     "roles": ["user"],
-    "scopes": ["orders:read","orders:write"],
+    "scopes": ["orders:read", "orders:write"],
     "isActive": true
   }'
 ```
 
-## 6.3 Update API User (roles/password/status)
-
-`PATCH /auth/users/:username`
+## 5.3 `PATCH /auth/users/:username`
 
 ```bash
 curl -s -X PATCH "$BASE_URL/auth/users/vendor2" \
@@ -187,27 +241,21 @@ curl -s -X PATCH "$BASE_URL/auth/users/vendor2" \
   }'
 ```
 
-## 6.4 Mark Paid (Manual Fulfillment Trigger)
-
-`POST /orders/:id/mark_paid`
+## 5.4 `POST /orders/:id/mark_paid`
 
 ```bash
 curl -s -X POST "$BASE_URL/orders/$ORDER_ID/mark_paid" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-## 6.5 Verify Payments
-
-`POST /payments/verify`
+## 5.5 `POST /payments/verify`
 
 ```bash
 curl -s -X POST "$BASE_URL/payments/verify" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-## 6.6 Verify Payments Debug
-
-`POST /payments/verify_debug`
+## 5.6 `POST /payments/verify_debug`
 
 ```bash
 curl -s -X POST "$BASE_URL/payments/verify_debug" \
@@ -216,24 +264,32 @@ curl -s -X POST "$BASE_URL/payments/verify_debug" \
   -d '{"limit":10}'
 ```
 
-## 6.7 Finance Summary
-
-`GET /finance/summary`
+## 5.7 `GET /finance/summary`
 
 ```bash
 curl -s "$BASE_URL/finance/summary" \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-## 7) Error Format
+## 6) Order State Machine
 
-Typical error response:
+Typical states:
+- `payment_required`
+- `pending`
+- `fulfilling`
+- `active`
+- `complete`
+- `canceled`
+
+## 7) Error Shape
+
+Typical format:
 
 ```json
 {
   "ok": false,
-  "error": "unauthorized",
-  "message": "Invalid username or password"
+  "error": "validation_error",
+  "message": "Pool not allowed: ..."
 }
 ```
 
@@ -245,10 +301,16 @@ Common `error` values:
 - `not_found`
 - `internal_error`
 
-## 8) Security Notes
+## 8) Notes About Discord-Only Features
 
-- Run API behind HTTPS (reverse proxy or load balancer).
-- Keep JWT keys/secrets in secure secret storage.
-- Use strong bcrypt password hashes for `API_AUTH_*` credentials.
-- Use admin endpoints to manage users/roles instead of editing `.env`.
-- Rotate credentials and keys regularly.
+Direct business request commands (`/rent-with-fixed-speed`, `/rent-with-fixed-duration`) are currently Discord command flows.
+
+REST endpoints for those direct command payloads are not exposed yet.
+
+## 9) Security and Ops Notes
+
+- Put API behind HTTPS in production.
+- Rotate JWT keys/secrets regularly.
+- Prefer DB-managed API users over static env-only credentials.
+- Keep admin scopes/roles minimal.
+- Enable and monitor rate limits for login and general routes.
