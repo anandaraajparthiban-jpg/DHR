@@ -1078,6 +1078,43 @@ function bodyString(body: Record<string, unknown>, field: string): string {
   return value.trim();
 }
 
+function optionalBodyNumber(body: Record<string, unknown>, ...fields: string[]): number | undefined {
+  for (const field of fields) {
+    if (!(field in body)) continue;
+    const raw = body[field];
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    const n = Number(raw);
+    if (!isFinite(n)) {
+      throw new ApiHttpError(400, 'bad_request', `Field '${field}' must be a number`);
+    }
+    return n;
+  }
+  return undefined;
+}
+
+function bodyStringAny(body: Record<string, unknown>, ...fields: string[]): string {
+  for (const field of fields) {
+    if (!(field in body)) continue;
+    const raw = body[field];
+    if (typeof raw === 'string' && raw.trim()) return raw.trim();
+  }
+  const first = fields[0] ?? 'field';
+  throw new ApiHttpError(400, 'bad_request', `Field '${first}' must be a non-empty string`);
+}
+
+function optionalBodyString(body: Record<string, unknown>, ...fields: string[]): string | undefined {
+  for (const field of fields) {
+    if (!(field in body)) continue;
+    const raw = body[field];
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    if (typeof raw !== 'string' || !raw.trim()) {
+      throw new ApiHttpError(400, 'bad_request', `Field '${field}' must be a non-empty string`);
+    }
+    return raw.trim();
+  }
+  return undefined;
+}
+
 function optionalBoundedInteger(value: unknown, fallback: number, min: number, max: number): number {
   if (value === undefined || value === null || value === '') return fallback;
   const n = Number(value);
@@ -1646,6 +1683,207 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
         orderMode: 'auto',
         orderModeLabel: nhOrderModeLabel('auto'),
         orderModeBehavior: nhOrderModeBehavior('auto'),
+        payment: {
+          id: payment.id,
+          status: payment.status,
+          reference: payment.reference,
+          expiresAt: payment.expiresAt,
+          usdcBaseAddress: paymentUsdcBaseAddress(),
+          usdcSolAddress: paymentUsdcSolAddress(),
+          btcOnchainAddress: paymentBtcAddress(),
+          usdcBaseAmount: payment.usdcBaseAmount,
+          usdcSolAmount: payment.usdcSolAmount,
+          btcAmount: payment.btcAmount,
+        },
+      });
+      return;
+    }
+
+    if (method === 'POST' && routePath === '/rent/fixed_speed') {
+      const body = await readJsonBody(req, cfg.maxBodyBytes);
+      const amount = bodyNumber(body, 'amount');
+      const limitTh = optionalBodyNumber(body, 'limit_th', 'limitTh');
+      const bottomLimitTh = optionalBodyNumber(body, 'bottom_limit_th', 'bottomLimitTh');
+      const pool = bodyStringAny(body, 'pool');
+      const worker = bodyStringAny(body, 'worker');
+
+      if (!isFinite(amount) || amount <= 0) {
+        throw new ApiHttpError(400, 'validation_error', 'Field \'amount\' must be > 0');
+      }
+      if (limitTh === undefined) {
+        throw new ApiHttpError(400, 'bad_request', "Field 'limit_th' is required");
+      }
+
+      const poolOk = validatePool(pool);
+      if (!poolOk.valid) {
+        throw new ApiHttpError(400, 'validation_error', `Pool not allowed: ${poolOk.reason ?? 'invalid pool'}`);
+      }
+      if (!isValidWorkerName(worker)) {
+        throw new ApiHttpError(400, 'validation_error', 'Worker must be a valid BTC mainnet address only (no suffix like .worker, no dots)');
+      }
+
+      let limitEh: number;
+      let bottomLimitEh: number | undefined;
+      try {
+        limitEh = ehFromTh(limitTh);
+        bottomLimitEh = typeof bottomLimitTh === 'number' ? ehFromTh(bottomLimitTh) : undefined;
+      } catch (err) {
+        throw new ApiHttpError(400, 'validation_error', err instanceof Error ? err.message : 'Invalid TH/s value');
+      }
+
+      const btcPrice = await btcUsd().catch(() => NaN);
+      if (!isFinite(btcPrice) || btcPrice <= 0) {
+        throw new ApiHttpError(503, 'quote_unavailable', 'BTC price unavailable; unable to create payment intent');
+      }
+      const totalUsd = Number((amount * btcPrice).toFixed(6));
+      const configuredHours = Number(process.env.NH_DIRECT_SPEED_ORDER_HOURS ?? '24');
+      const hoursForOrder = isFinite(configuredHours) ? Math.min(72, Math.max(1, Math.round(configuredHours))) : 24;
+      const phFromLimit = limitEh * 1000;
+      const directConfig: NhDirectFixedSpeedConfig = {
+        kind: 'direct_fixed_speed',
+        amount,
+        limitEh,
+        bottomLimitEh,
+      };
+
+      const order = await createOrder({
+        ph: phFromLimit,
+        hours: hoursForOrder,
+        pool,
+        worker,
+        requestedProvider: DEFAULT_FULFILLMENT_PROVIDER,
+        nhRequestedMode: 'direct_fixed_speed',
+        nhDirectConfig: JSON.stringify(directConfig),
+        user: auth.userId,
+        totalUsd,
+      });
+      const payment = await ensurePaymentIntent({
+        orderId: order.id,
+        userId: auth.userId,
+        totalUsd: order.totalUsd,
+        btcUsd: btcPrice,
+        expiresAt: order.expiresAt ?? Date.now() + hoursForOrder * 3600 * 1000,
+      });
+
+      sendApiJson(res, 201, {
+        ok: true,
+        message: 'Fixed-speed order request created',
+        order,
+        orderMode: 'direct_fixed_speed',
+        orderModeLabel: requestedOrderModeLabel('direct_fixed_speed'),
+        orderModeBehavior: 'After payment confirmation: business fixed speed first, then standard fallback.',
+        request: {
+          amountBtc: amount,
+          limitTh,
+          bottomLimitTh: bottomLimitTh ?? null,
+        },
+        payment: {
+          id: payment.id,
+          status: payment.status,
+          reference: payment.reference,
+          expiresAt: payment.expiresAt,
+          usdcBaseAddress: paymentUsdcBaseAddress(),
+          usdcSolAddress: paymentUsdcSolAddress(),
+          btcOnchainAddress: paymentBtcAddress(),
+          usdcBaseAmount: payment.usdcBaseAmount,
+          usdcSolAmount: payment.usdcSolAmount,
+          btcAmount: payment.btcAmount,
+        },
+      });
+      return;
+    }
+
+    if (method === 'POST' && routePath === '/rent/fixed_duration') {
+      const body = await readJsonBody(req, cfg.maxBodyBytes);
+      const amount = bodyNumber(body, 'amount');
+      const hours = bodyInteger(body, 'hours');
+      const pool = bodyStringAny(body, 'pool');
+      const worker = bodyStringAny(body, 'worker');
+      const limitTh = optionalBodyNumber(body, 'limit_th', 'limitTh');
+      const bottomLimitTh = optionalBodyNumber(body, 'bottom_limit_th', 'bottomLimitTh');
+      const variantRaw = optionalBodyString(body, 'variant');
+      const variant = variantRaw ? parseDurationVariantInput(variantRaw) : 'auto';
+
+      if (!isFinite(amount) || amount <= 0) {
+        throw new ApiHttpError(400, 'validation_error', 'Field \'amount\' must be > 0');
+      }
+      if (!isFinite(hours) || hours <= 0 || hours > 72) {
+        throw new ApiHttpError(400, 'validation_error', 'Field \'hours\' must be an integer within [1, 72]');
+      }
+      if (variantRaw && !variant) {
+        throw new ApiHttpError(
+          400,
+          'bad_request',
+          "Field 'variant' must be one of: auto, business_type_endts, business_type_subtype_endts, business_engine_duration, business_engine_duration_endts, business_engine_subtype_duration_endts"
+        );
+      }
+
+      const poolOk = validatePool(pool);
+      if (!poolOk.valid) {
+        throw new ApiHttpError(400, 'validation_error', `Pool not allowed: ${poolOk.reason ?? 'invalid pool'}`);
+      }
+      if (!isValidWorkerName(worker)) {
+        throw new ApiHttpError(400, 'validation_error', 'Worker must be a valid BTC mainnet address only (no suffix like .worker, no dots)');
+      }
+
+      let limitEh: number | undefined;
+      let bottomLimitEh: number | undefined;
+      try {
+        limitEh = typeof limitTh === 'number' ? ehFromTh(limitTh) : undefined;
+        bottomLimitEh = typeof bottomLimitTh === 'number' ? ehFromTh(bottomLimitTh) : undefined;
+      } catch (err) {
+        throw new ApiHttpError(400, 'validation_error', err instanceof Error ? err.message : 'Invalid TH/s value');
+      }
+
+      const btcPrice = await btcUsd().catch(() => NaN);
+      if (!isFinite(btcPrice) || btcPrice <= 0) {
+        throw new ApiHttpError(503, 'quote_unavailable', 'BTC price unavailable; unable to create payment intent');
+      }
+      const totalUsd = Number((amount * btcPrice).toFixed(6));
+      const phApprox = (limitEh ?? bottomLimitEh ?? 0.001) * 1000;
+      const directConfig: NhDirectFixedDurationConfig = {
+        kind: 'direct_fixed_duration',
+        amount,
+        hours,
+        limitEh,
+        bottomLimitEh,
+        variant: variant ?? 'auto',
+      };
+
+      const order = await createOrder({
+        ph: phApprox,
+        hours,
+        pool,
+        worker,
+        requestedProvider: DEFAULT_FULFILLMENT_PROVIDER,
+        nhRequestedMode: 'direct_fixed_duration',
+        nhDirectConfig: JSON.stringify(directConfig),
+        user: auth.userId,
+        totalUsd,
+      });
+      const payment = await ensurePaymentIntent({
+        orderId: order.id,
+        userId: auth.userId,
+        totalUsd: order.totalUsd,
+        btcUsd: btcPrice,
+        expiresAt: order.expiresAt ?? Date.now() + hours * 3600 * 1000,
+      });
+
+      sendApiJson(res, 201, {
+        ok: true,
+        message: 'Fixed-duration order request created',
+        order,
+        orderMode: 'direct_fixed_duration',
+        orderModeLabel: requestedOrderModeLabel('direct_fixed_duration'),
+        orderModeBehavior:
+          'After payment confirmation: business fixed duration variant(s) first, then standard fallback.',
+        request: {
+          amountBtc: amount,
+          hours,
+          limitTh: limitTh ?? null,
+          bottomLimitTh: bottomLimitTh ?? null,
+          variant: variant ?? 'auto',
+        },
         payment: {
           id: payment.id,
           status: payment.status,

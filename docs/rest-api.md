@@ -30,25 +30,7 @@ Request body:
 }
 ```
 
-Successful response:
-
-```json
-{
-  "ok": true,
-  "accessToken": "<jwt>",
-  "tokenType": "Bearer",
-  "expiresIn": 1800,
-  "user": {
-    "username": "vendor1",
-    "subject": "vendor1",
-    "roles": ["user"],
-    "scopes": ["orders:read", "orders:write"],
-    "isActive": true
-  }
-}
-```
-
-Use token:
+Use token in protected routes:
 
 ```text
 Authorization: Bearer <jwt>
@@ -89,9 +71,6 @@ export TOKEN=$(echo "$LOGIN_RESPONSE" | jq -r '.accessToken')
 
 ## 4.1 `POST /quote`
 
-Purpose:
-- Quote price and show breakdown.
-
 Request body:
 
 ```json
@@ -100,11 +79,6 @@ Request body:
   "hours": 12
 }
 ```
-
-Behavior:
-- Uses NiceHash quote source.
-- Mode behavior for quote context is automatic:
-  - `business_fixed_speed` -> `business_fixed_duration` -> `standard`
 
 Example:
 
@@ -115,10 +89,13 @@ curl -s "$BASE_URL/quote" \
   -d '{"ph":1,"hours":12}'
 ```
 
+Notes:
+- Quote context uses NH automatic fallback behavior:
+  - `business_fixed_speed` -> `business_fixed_duration` -> `standard`
+
 ## 4.2 `POST /rent`
 
-Purpose:
-- Create order + payment intent (payment-first flow).
+Payment-first order request with PH/hours inputs.
 
 Request body:
 
@@ -145,44 +122,118 @@ curl -s "$BASE_URL/rent" \
   }'
 ```
 
+Post-payment fulfillment behavior:
+- `business_fixed_speed` -> `business_fixed_duration` -> `standard`
+
+## 4.3 `POST /rent/fixed_speed`
+
+Payment-first request for direct fixed-speed flow.
+
+Request body:
+
+```json
+{
+  "amount": 0.0015,
+  "limit_th": 2000,
+  "bottom_limit_th": 1000,
+  "pool": "stratum+tcp://yourpool:3333",
+  "worker": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+}
+```
+
 Notes:
-- NH placement occurs after payment confirmation, not at request creation time.
-- At fulfillment time, this route uses automatic fallback:
-  - `business_fixed_speed` -> `business_fixed_duration` -> `standard`
-
-## 4.3 `GET /orders/:id`
-
-Purpose:
-- Order status and summary fields.
+- `bottom_limit_th` is optional.
+- Also accepts camelCase aliases: `limitTh`, `bottomLimitTh`.
 
 Example:
+
+```bash
+curl -s "$BASE_URL/rent/fixed_speed" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": 0.0015,
+    "limit_th": 2000,
+    "bottom_limit_th": 1000,
+    "pool": "stratum+tcp://yourpool:3333",
+    "worker": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+  }'
+```
+
+Post-payment fulfillment behavior:
+- `business_fixed_speed` -> `standard`
+
+## 4.4 `POST /rent/fixed_duration`
+
+Payment-first request for direct fixed-duration flow.
+
+Request body:
+
+```json
+{
+  "amount": 0.0015,
+  "hours": 24,
+  "bottom_limit_th": 1000,
+  "limit_th": 2000,
+  "variant": "auto",
+  "pool": "stratum+tcp://yourpool:3333",
+  "worker": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+}
+```
+
+Notes:
+- `bottom_limit_th`, `limit_th`, `variant` are optional.
+- CamelCase aliases accepted for TH fields: `limitTh`, `bottomLimitTh`.
+- `variant` values:
+  - `auto`
+  - `business_type_endts`
+  - `business_type_subtype_endts`
+  - `business_engine_duration`
+  - `business_engine_duration_endts`
+  - `business_engine_subtype_duration_endts`
+
+Example:
+
+```bash
+curl -s "$BASE_URL/rent/fixed_duration" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": 0.0015,
+    "hours": 24,
+    "bottom_limit_th": 1000,
+    "limit_th": 2000,
+    "variant": "auto",
+    "pool": "stratum+tcp://yourpool:3333",
+    "worker": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+  }'
+```
+
+Post-payment fulfillment behavior:
+- business duration variant(s) -> `standard`
+
+## 4.5 `GET /orders/:id`
 
 ```bash
 curl -s "$BASE_URL/orders/$ORDER_ID" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-## 4.4 `GET /orders/:id/time_left`
-
-Example:
+## 4.6 `GET /orders/:id/time_left`
 
 ```bash
 curl -s "$BASE_URL/orders/$ORDER_ID/time_left" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-## 4.5 `POST /orders/:id/cancel`
-
-Example:
+## 4.7 `POST /orders/:id/cancel`
 
 ```bash
 curl -s -X POST "$BASE_URL/orders/$ORDER_ID/cancel" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-## 4.6 `GET /orders/:id/payment_status`
-
-Example:
+## 4.8 `GET /orders/:id/payment_status`
 
 ```bash
 curl -s "$BASE_URL/orders/$ORDER_ID/payment_status" \
@@ -301,16 +352,10 @@ Common `error` values:
 - `not_found`
 - `internal_error`
 
-## 8) Notes About Discord-Only Features
-
-Direct business request commands (`/rent-with-fixed-speed`, `/rent-with-fixed-duration`) are currently Discord command flows.
-
-REST endpoints for those direct command payloads are not exposed yet.
-
-## 9) Security and Ops Notes
+## 8) Security and Ops Notes
 
 - Put API behind HTTPS in production.
 - Rotate JWT keys/secrets regularly.
-- Prefer DB-managed API users over static env-only credentials.
+- Prefer DB-managed API users over static env credentials.
 - Keep admin scopes/roles minimal.
 - Enable and monitor rate limits for login and general routes.
