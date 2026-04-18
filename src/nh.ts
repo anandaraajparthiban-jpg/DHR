@@ -50,6 +50,13 @@ export interface NhAlgorithmInfo {
   raw: any;
 }
 
+export function canonicalNhMarket(raw: unknown): string | undefined {
+  const market = String(raw ?? '').trim().toUpperCase();
+  if (!market) return undefined;
+  if (market === 'EU' || market === 'USA') return 'BTC';
+  return market;
+}
+
 function extractFinitePricesFromOrderbook(ordersRaw: any): number[] {
   const orders = Array.isArray(ordersRaw) ? ordersRaw : [];
   const n = (v: any): number => {
@@ -215,9 +222,13 @@ export async function getNhAlgorithmInfo(algo: string = 'SHA256ASICBOOST'): Prom
       : Array.isArray(entry?.enabledHashpowerMarkets)
         ? entry.enabledHashpowerMarkets
         : [];
-  const enabledMarkets = enabledMarketsRaw
-    .map((m: any) => String(m?.market ?? m?.name ?? m ?? '').toUpperCase())
-    .filter(Boolean);
+  const enabledMarkets = Array.from(
+    new Set(
+      enabledMarketsRaw
+        .map((m: any) => canonicalNhMarket(m?.market ?? m?.name ?? m))
+        .filter((m): m is string => Boolean(m))
+    )
+  );
 
   const minSpeedLimit = toFiniteNumber(entry?.minSpeedLimit, entry?.min_limit, entry?.minimumLimit, 0);
   const maxSpeedLimit = toFiniteNumber(entry?.maxSpeedLimit, entry?.max_limit, entry?.maximumLimit, Number.POSITIVE_INFINITY);
@@ -248,7 +259,7 @@ export async function getNhBuyInfo(algo: string = 'SHA256ASICBOOST'): Promise<Nh
   const entryAlgo = algoCode(entry);
   const legacyMarkets = Array.isArray(entry?.markets) ? entry.markets : Array.isArray(entry?.market) ? entry.market : [];
   let markets: NhMarketInfo[] = legacyMarkets.map((m: any) => ({
-    market: String(m.market || m.name || '').toUpperCase(),
+    market: canonicalNhMarket(m.market || m.name || '') || '',
     marketFactor: Number(m.marketFactor || m.factor || m.market_factor || 0),
     displayMarketFactor: String(m.displayMarketFactor || m.marketDisplayFactor || ''),
     priceFactor: Number(m.priceFactor || m.price_factor || 0),
@@ -270,7 +281,7 @@ export async function getNhBuyInfo(algo: string = 'SHA256ASICBOOST'): Promise<Nh
     const minPrice = Number(entry?.minPrice ?? entry?.min_price ?? 0);
     const minLimit = Number(entry?.minLimit ?? entry?.min_limit ?? 0);
     markets = entry.enabledHashpowerMarkets
-      .map((m: any) => String(m || '').toUpperCase())
+      .map((m: any) => canonicalNhMarket(m))
       .filter(Boolean)
       .map((market: string) => ({
         market,
@@ -295,7 +306,7 @@ export async function fetchOrderbook(algo: string, market: string): Promise<NhMa
     pageSize: 50,
   });
 
-  const marketUpper = market.toUpperCase();
+  const marketUpper = canonicalNhMarket(market) ?? market.toUpperCase();
   const stat = data?.stats?.[marketUpper] ?? data?.stats;
   const quote = quoteFromOrderbookStat(stat, marketUpper);
   if (quote) return quote;
@@ -322,7 +333,7 @@ export async function getNhBestMarketPrice(algo: string = 'SHA256ASICBOOST'): Pr
     const stats = allData?.stats;
     if (stats && typeof stats === 'object') {
       for (const [marketRaw, stat] of Object.entries(stats as Record<string, unknown>)) {
-        const market = String(marketRaw || '').toUpperCase().trim();
+        const market = canonicalNhMarket(marketRaw);
         if (!market) continue;
         const quote = quoteFromOrderbookStat(stat, market);
         if (quote) priced.push(quote);
@@ -337,13 +348,18 @@ export async function getNhBestMarketPrice(algo: string = 'SHA256ASICBOOST'): Pr
 
   if (!priced.length) {
     const envMarketsRaw = String(process.env.NICEHASH_MARKETS_FALLBACK || '').trim();
-    const fallbackMarkets =
-      envMarketsRaw.length > 0
-        ? envMarketsRaw
-            .split(',')
-            .map((m) => m.trim().toUpperCase())
-            .filter(Boolean)
-        : ['BTC', 'EU', 'USA'];
+    const fallbackMarkets = Array.from(
+      new Set(
+        (
+          envMarketsRaw.length > 0
+            ? envMarketsRaw
+                .split(',')
+                .map((m) => canonicalNhMarket(m))
+                .filter((m): m is string => Boolean(m))
+            : ['BTC']
+        ).concat('BTC')
+      )
+    );
 
     for (const market of fallbackMarkets) {
       try {

@@ -1,7 +1,7 @@
 // nhOrder.ts — NiceHash order placement/cancel.
 import { ensurePool } from './pool.js';
 import { btcUsd } from './pricing.js';
-import { getNhBuyInfo, getNhBestMarketPrice, buildNhOrderParams, getNhAlgorithmInfo, fetchOrderbook } from './nh.js';
+import { getNhBuyInfo, getNhBestMarketPrice, buildNhOrderParams, getNhAlgorithmInfo, fetchOrderbook, canonicalNhMarket } from './nh.js';
 import { nhPrivateRequest } from './nhHttp.js';
 
 export type NhOrderMode = 'auto' | 'standard' | 'business_fixed_speed' | 'business_fixed_duration';
@@ -131,10 +131,11 @@ async function resolveNhOrderEconomics(opts: Pick<NhOrderInput, 'ph' | 'hours' |
   const buyInfo = await getNhBuyInfo('SHA256ASICBOOST');
   const best = await getNhBestMarketPrice('SHA256ASICBOOST');
   const algoInfo = await getNhAlgorithmInfo('SHA256ASICBOOST');
-  const preferredMarket =
-    algoInfo.enabledMarkets.length > 0 && !algoInfo.enabledMarkets.includes(best.market.toUpperCase())
-      ? algoInfo.enabledMarkets[0]
-      : best.market;
+  const bestMarket = canonicalNhMarket(best.market) ?? 'BTC';
+  const normalizedEnabledMarkets = Array.from(
+    new Set(algoInfo.enabledMarkets.map((m) => canonicalNhMarket(m)).filter((m): m is string => Boolean(m)))
+  );
+  const preferredMarket = bestMarket || normalizedEnabledMarkets[0] || 'BTC';
   const btcPrice = await btcUsd();
   const { price, limit, amount, market } = buildNhOrderParams({
     ph,
@@ -239,14 +240,16 @@ function normalizeDirectMarket(
   requestedMarket: string | undefined,
   algoInfo: Awaited<ReturnType<typeof getNhAlgorithmInfo>>
 ): string {
-  const enabled = algoInfo.enabledMarkets.map((m) => m.toUpperCase()).filter(Boolean);
+  const enabled = Array.from(
+    new Set(algoInfo.enabledMarkets.map((m) => canonicalNhMarket(m)).filter((m): m is string => Boolean(m)))
+  );
   if (requestedMarket && requestedMarket.trim()) {
-    const desired = requestedMarket.trim().toUpperCase();
+    const desired = canonicalNhMarket(requestedMarket) ?? requestedMarket.trim().toUpperCase();
     if (enabled.length === 0 || enabled.includes(desired)) return desired;
     throw new Error(`Market ${desired} is not enabled for ${algoInfo.algorithm}. Enabled markets: ${enabled.join(', ')}`);
   }
   if (enabled.length > 0) return enabled[0];
-  return 'EU';
+  return 'BTC';
 }
 
 function directMarketAndPriceFactors(
