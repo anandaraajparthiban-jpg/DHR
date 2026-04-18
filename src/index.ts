@@ -472,6 +472,13 @@ function usdBtcLine(usd: number, btcPrice: number, usdDecimals: number = 2): str
   return `${usdPart} (${(usd / btcPrice).toFixed(8)} BTC)`;
 }
 
+function truncateDiscordContent(content: string, limit: number = 2000): string {
+  if (content.length <= limit) return content;
+  const suffix = `\n...[truncated ${content.length - limit} chars]`;
+  const headLimit = Math.max(0, limit - suffix.length);
+  return `${content.slice(0, headLimit)}${suffix}`;
+}
+
 function envTrimmed(name: string): string | undefined {
   const raw = process.env[name];
   if (!raw) return undefined;
@@ -2762,10 +2769,12 @@ async function handleMarkPaid(interaction: ChatInputCommandInteraction) {
   try {
     const requireVerified = (process.env.REQUIRE_PAYMENT_CONFIRMATION_FOR_MARK_PAID ?? 'false').toLowerCase() === 'true';
     const result = await fulfillOrder(id, requireVerified);
-    await interaction.reply({ content: result, ephemeral: true });
+    await interaction.reply({ content: truncateDiscordContent(result, 2000), ephemeral: true });
   } catch (err) {
     await rollbackFulfillment(id).catch((rollbackErr) => console.error('fulfillment rollback failed', rollbackErr));
-    await interaction.reply({ content: `Fulfillment error: ${(err as Error).message}`, ephemeral: true });
+    const fullMsg = `Fulfillment error: ${(err as Error).message}`;
+    console.error(`handleMarkPaid detailed error for order ${id}: ${fullMsg}`);
+    await interaction.reply({ content: truncateDiscordContent(fullMsg, 2000), ephemeral: true });
   }
 }
 
