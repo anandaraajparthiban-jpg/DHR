@@ -323,6 +323,9 @@ async function resolveFulfillmentQuote(input: {
 }> {
   const routingQuote = await quoteHashrate({ ...input, preferredSource: 'nicehash' });
   if (routingQuote.source !== 'nicehash') {
+    console.error(
+      `resolveFulfillmentQuote: expected nicehash source but got ${routingQuote.source} (usdPerPhDay=${routingQuote.usdPerPhDay}, totalUsd=${routingQuote.totalUsd})`
+    );
     throw new Error('NiceHash quote unavailable right now. Please retry shortly.');
   }
 
@@ -1599,6 +1602,7 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
           orderMode: 'auto',
         });
       } catch (err) {
+        console.error('REST /quote failed', err);
         throw new ApiHttpError(503, 'quote_unavailable', err instanceof Error ? err.message : 'Quote unavailable');
       }
 
@@ -2240,6 +2244,7 @@ async function handleQuote(interaction: ChatInputCommandInteraction) {
       orderMode: 'auto',
     });
   } catch (err) {
+    console.error('Discord /quote failed', err);
     const msg = (err as Error).message || 'No valid quote available right now.';
     await interaction.reply({ content: msg, ephemeral: true });
     return;

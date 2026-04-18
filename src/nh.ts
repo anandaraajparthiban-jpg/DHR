@@ -50,6 +50,47 @@ export interface NhAlgorithmInfo {
   raw: any;
 }
 
+function extractFinitePricesFromOrderbook(ordersRaw: any): number[] {
+  const orders = Array.isArray(ordersRaw) ? ordersRaw : [];
+  const n = (v: any): number => {
+    const x = Number(v);
+    return isFinite(x) ? x : 0;
+  };
+  const businessAlive = orders.filter(
+    (o: any) => String(o?.type || '').toUpperCase() === 'BUSINESS' && Boolean(o?.alive ?? true)
+  );
+  const activeSpeedAlive = orders.filter(
+    (o: any) => Boolean(o?.alive ?? true) && (n(o?.payingSpeed) > 0 || n(o?.acceptedSpeed) > 0 || n(o?.rigsCount) > 0)
+  );
+  const aliveOrders = orders.filter((o: any) => Boolean(o?.alive ?? true));
+  const candidateOrders =
+    businessAlive.length > 0 ? businessAlive : activeSpeedAlive.length > 0 ? activeSpeedAlive : aliveOrders.length > 0 ? aliveOrders : orders;
+  return candidateOrders
+    .map((o: any) => Number(o.price))
+    .filter((price: number) => isFinite(price) && price > 0);
+}
+
+function quoteFromOrderbookStat(stat: any, marketUpper: string): NhMarketQuote | undefined {
+  const prices = extractFinitePricesFromOrderbook(stat?.orders);
+  if (!prices.length) return undefined;
+  const marketFactor = Number(stat?.marketFactor);
+  const priceFactor = Number(stat?.priceFactor);
+  const marketFactorRaw = typeof stat?.marketFactor === 'string' ? stat.marketFactor : undefined;
+  const priceFactorRaw = typeof stat?.priceFactor === 'string' ? stat.priceFactor : undefined;
+  const displayMarketFactor = typeof stat?.displayMarketFactor === 'string' ? stat.displayMarketFactor : undefined;
+  const displayPriceFactor = typeof stat?.displayPriceFactor === 'string' ? stat.displayPriceFactor : undefined;
+  return {
+    market: marketUpper,
+    btcPerEhDay: Math.min(...prices),
+    marketFactor: isFinite(marketFactor) && marketFactor > 0 ? marketFactor : undefined,
+    displayMarketFactor,
+    priceFactor: isFinite(priceFactor) && priceFactor > 0 ? priceFactor : undefined,
+    displayPriceFactor,
+    marketFactorRaw,
+    priceFactorRaw,
+  };
+}
+
 export function buildNhOrderParams({
   ph,
   hours,
@@ -256,59 +297,71 @@ export async function fetchOrderbook(algo: string, market: string): Promise<NhMa
 
   const marketUpper = market.toUpperCase();
   const stat = data?.stats?.[marketUpper] ?? data?.stats;
-  const ordersRaw = stat?.orders || data?.orderList || [];
-  const orders = Array.isArray(ordersRaw) ? ordersRaw : [];
-  const n = (v: any): number => {
-    const x = Number(v);
-    return isFinite(x) ? x : 0;
-  };
-  const businessAlive = orders.filter(
-    (o: any) => String(o?.type || '').toUpperCase() === 'BUSINESS' && Boolean(o?.alive ?? true)
-  );
-  const activeSpeedAlive = orders.filter(
-    (o: any) => Boolean(o?.alive ?? true) && (n(o?.payingSpeed) > 0 || n(o?.acceptedSpeed) > 0 || n(o?.rigsCount) > 0)
-  );
-  const aliveOrders = orders.filter((o: any) => Boolean(o?.alive ?? true));
-  const candidateOrders =
-    businessAlive.length > 0 ? businessAlive : activeSpeedAlive.length > 0 ? activeSpeedAlive : aliveOrders.length > 0 ? aliveOrders : orders;
-  const prices = Array.isArray(candidateOrders)
-    ? candidateOrders
-        .map((o: any) => Number(o.price))
-        .filter((n: number) => !isNaN(n))
-    : [];
-  if (!prices.length) throw new Error(`orderBook ${marketUpper} no prices`);
-  const marketFactor = Number(stat?.marketFactor);
-  const priceFactor = Number(stat?.priceFactor);
-  const marketFactorRaw = typeof stat?.marketFactor === 'string' ? stat.marketFactor : undefined;
-  const priceFactorRaw = typeof stat?.priceFactor === 'string' ? stat.priceFactor : undefined;
-  const displayMarketFactor = typeof stat?.displayMarketFactor === 'string' ? stat.displayMarketFactor : undefined;
-  const displayPriceFactor = typeof stat?.displayPriceFactor === 'string' ? stat.displayPriceFactor : undefined;
-  return {
-    market: marketUpper,
-    btcPerEhDay: Math.min(...prices),
-    marketFactor: isFinite(marketFactor) && marketFactor > 0 ? marketFactor : undefined,
-    displayMarketFactor,
-    priceFactor: isFinite(priceFactor) && priceFactor > 0 ? priceFactor : undefined,
-    displayPriceFactor,
-    marketFactorRaw,
-    priceFactorRaw,
-  };
+  const quote = quoteFromOrderbookStat(stat, marketUpper);
+  if (quote) return quote;
+  const fallbackPrices = extractFinitePricesFromOrderbook(data?.orderList);
+  if (fallbackPrices.length > 0) {
+    return {
+      market: marketUpper,
+      btcPerEhDay: Math.min(...fallbackPrices),
+    };
+  }
+  throw new Error(`orderBook ${marketUpper} no prices`);
 }
 
 export async function getNhBestMarketPrice(algo: string = 'SHA256ASICBOOST'): Promise<NhMarketQuote> {
-  const markets = ['USA', 'EU'];
   const priced: NhMarketQuote[] = [];
+  const errors: string[] = [];
 
-  for (const market of markets) {
-    try {
-      const quote = await fetchOrderbook(algo, market);
-      priced.push(quote);
-    } catch {
-      // ignore individual market fetch failures
+  try {
+    const allData: any = await nhPublicRequest('/main/api/v2/hashpower/orderBook', {
+      algorithm: algo,
+      page: 0,
+      pageSize: 50,
+    });
+    const stats = allData?.stats;
+    if (stats && typeof stats === 'object') {
+      for (const [marketRaw, stat] of Object.entries(stats as Record<string, unknown>)) {
+        const market = String(marketRaw || '').toUpperCase().trim();
+        if (!market) continue;
+        const quote = quoteFromOrderbookStat(stat, market);
+        if (quote) priced.push(quote);
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const detail = `orderBook all-markets lookup failed: ${msg}`;
+    console.error(detail);
+    errors.push(detail);
+  }
+
+  if (!priced.length) {
+    const envMarketsRaw = String(process.env.NICEHASH_MARKETS_FALLBACK || '').trim();
+    const fallbackMarkets =
+      envMarketsRaw.length > 0
+        ? envMarketsRaw
+            .split(',')
+            .map((m) => m.trim().toUpperCase())
+            .filter(Boolean)
+        : ['BTC', 'EU', 'USA'];
+
+    for (const market of fallbackMarkets) {
+      try {
+        const quote = await fetchOrderbook(algo, market);
+        priced.push(quote);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const detail = `orderBook ${market} lookup failed: ${msg}`;
+        console.error(detail);
+        errors.push(detail);
+      }
     }
   }
 
-  if (!priced.length) throw new Error('No market prices available');
+  if (!priced.length) {
+    const suffix = errors.length > 0 ? ` details=${errors.join(' | ')}` : '';
+    throw new Error(`No market prices available for ${algo}.${suffix}`);
+  }
   priced.sort((a, b) => a.btcPerEhDay - b.btcPerEhDay);
   return priced[0];
 }
