@@ -1,7 +1,7 @@
 // index.ts — Discord bot main:
-// - Registers slash commands (/quote, /rent-with-fixed-speed, /rent-with-fixed-duration, /status, /time_left, /cancel, /payment_status, /mark_paid, /verify_payments, /verify_payments_debug, /nh_payload_preview, /finance_summary).
-// - Legacy /rent can be re-enabled via SHOW_LEGACY_RENT_COMMAND=true.
-// - /rent collects pool + worker, creates payment intent, and waits for payment.
+// - Registers slash commands (/quote, /rent, /status, /time_left, /cancel, /payment_status, /mark_paid, /verify_payments, /verify_payments_debug, /nh_payload_preview, /finance_summary).
+// - Legacy /rent PH/hours flow is kept in code but not registered as a command.
+// - /rent now uses fixed-speed business request inputs and payment-first flow.
 // - On payment confirmation, orders can auto-activate; admin can still trigger /mark_paid manually.
 // - Fulfillment uses NiceHash only.
 import 'dotenv/config';
@@ -181,48 +181,37 @@ const commands = [
     .setDescription('Get a hashrate quote')
     .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
     .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(MAX_RENT_HOURS)),
-  ...(SHOW_LEGACY_RENT_COMMAND
-    ? [
-        new SlashCommandBuilder()
-          .setName('rent')
-          .setDescription('Place a hashrate rental')
-          .addNumberOption((opt) => opt.setName('ph').setDescription('Petahash requested').setRequired(true))
-          .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(MAX_RENT_HOURS))
-          .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL').setRequired(true))
-          .addStringOption((opt) => opt.setName('worker').setDescription('BTC address only (no suffix)').setRequired(true)),
-      ]
-    : []),
   new SlashCommandBuilder()
-    .setName('rent-with-fixed-speed')
+    .setName('rent')
     .setDescription('Place fixed-speed business order request (payment first, then business->standard)')
     .addNumberOption((opt) => opt.setName('amount').setDescription('Order amount in BTC').setRequired(true))
     .addNumberOption((opt) => opt.setName('limit_th').setDescription('Speed limit in TH/s').setRequired(true))
     .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL, e.g. stratum+tcp://host:3334').setRequired(true))
     .addStringOption((opt) => opt.setName('worker').setDescription('BTC address / worker').setRequired(true))
     .addNumberOption((opt) => opt.setName('bottom_limit_th').setDescription('Optional bottom limit in TH/s').setRequired(false)),
-  new SlashCommandBuilder()
-    .setName('rent-with-fixed-duration')
-    .setDescription('Place fixed-duration business order request (payment first, then business->standard)')
-    .addNumberOption((opt) => opt.setName('amount').setDescription('Order amount in BTC').setRequired(true))
-    .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(MAX_RENT_HOURS))
-    .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL, e.g. stratum+tcp://host:3334').setRequired(true))
-    .addStringOption((opt) => opt.setName('worker').setDescription('BTC address / worker').setRequired(true))
-    .addNumberOption((opt) => opt.setName('bottom_limit_th').setDescription('Optional bottom limit in TH/s').setRequired(false))
-    .addNumberOption((opt) => opt.setName('limit_th').setDescription('Optional speed cap in TH/s').setRequired(false))
-    .addStringOption((opt) =>
-      opt
-        .setName('variant')
-        .setDescription('Duration payload variant (default auto)')
-        .setRequired(false)
-        .addChoices(
-          { name: 'Auto', value: 'auto' },
-          { name: 'Type=BUSINESS + endTs', value: 'business_type_endts' },
-          { name: 'Type=BUSINESS + subType + endTs', value: 'business_type_subtype_endts' },
-          { name: 'Type=BUSINESS_ENGINE + duration', value: 'business_engine_duration' },
-          { name: 'Type=BUSINESS_ENGINE + duration + endTs', value: 'business_engine_duration_endts' },
-          { name: 'Type=BUSINESS_ENGINE + subType + duration + endTs', value: 'business_engine_subtype_duration_endts' }
-        )
-    ),
+  // new SlashCommandBuilder()
+  //   .setName('rent-with-fixed-duration')
+  //   .setDescription('Place fixed-duration business order request (payment first, then business->standard)')
+  //   .addNumberOption((opt) => opt.setName('amount').setDescription('Order amount in BTC').setRequired(true))
+  //   .addIntegerOption((opt) => opt.setName('hours').setDescription('Duration in hours').setRequired(true).setMaxValue(MAX_RENT_HOURS))
+  //   .addStringOption((opt) => opt.setName('pool').setDescription('Pool URL, e.g. stratum+tcp://host:3334').setRequired(true))
+  //   .addStringOption((opt) => opt.setName('worker').setDescription('BTC address / worker').setRequired(true))
+  //   .addNumberOption((opt) => opt.setName('bottom_limit_th').setDescription('Optional bottom limit in TH/s').setRequired(false))
+  //   .addNumberOption((opt) => opt.setName('limit_th').setDescription('Optional speed cap in TH/s').setRequired(false))
+  //   .addStringOption((opt) =>
+  //     opt
+  //       .setName('variant')
+  //       .setDescription('Duration payload variant (default auto)')
+  //       .setRequired(false)
+  //       .addChoices(
+  //         { name: 'Auto', value: 'auto' },
+  //         { name: 'Type=BUSINESS + endTs', value: 'business_type_endts' },
+  //         { name: 'Type=BUSINESS + subType + endTs', value: 'business_type_subtype_endts' },
+  //         { name: 'Type=BUSINESS_ENGINE + duration', value: 'business_engine_duration' },
+  //         { name: 'Type=BUSINESS_ENGINE + duration + endTs', value: 'business_engine_duration_endts' },
+  //         { name: 'Type=BUSINESS_ENGINE + subType + duration + endTs', value: 'business_engine_subtype_duration_endts' }
+  //       )
+  //   ),
   new SlashCommandBuilder()
     .setName('status')
     .setDescription('Check rental status')
@@ -2159,13 +2148,7 @@ client.on('interactionCreate', async (interaction) => {
         await handleQuote(interaction);
         break;
       case 'rent':
-        await handleRent(interaction);
-        break;
-      case 'rent-with-fixed-speed':
         await handleRentWithFixedSpeed(interaction);
-        break;
-      case 'rent-with-fixed-duration':
-        await handleRentWithFixedDuration(interaction);
         break;
       case 'status':
         await handleStatus(interaction);
